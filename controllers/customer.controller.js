@@ -40,6 +40,37 @@ exports.getCustomers = async (req, res) => {
   }
 };
 
+// controllers/customer.controller.js
+
+
+exports.searchCustomers = async (req, res) => {
+  console.log("hit search customers");
+  const searchTerm = req.query.q?.trim();
+
+  if (!searchTerm || searchTerm === "") {
+    return res.status(400).json({ success: false, message: "Search term is required." });
+  }
+
+  try {
+    const regex = new RegExp(searchTerm, "i");
+    const results = await db
+      .collection("customers")
+      .find({
+        $or: [
+          { name: { $regex: regex } },
+          { phone: { $regex: regex } },
+        ],
+      })
+      .limit(10)
+      .toArray();
+
+    res.status(200).json({ success: true, data: results });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
 // Update a customer
 exports.updateCustomer = async (req, res) => {
   const { id } = req.params;

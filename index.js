@@ -91,3 +91,11 @@ app.use("/api/purchases", purchaseRoutes);
 app.use("/api/sales", salesRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/customers', customerRoutes);
+
+
+const supplierRoutes = require("./routes/supplierRoutes");
+app.use("/api/suppliers", supplierRoutes);
+
+
+const transactionRoutes = require("./routes/transactionRoutes");
+app.use("/api/transactions", transactionRoutes);
