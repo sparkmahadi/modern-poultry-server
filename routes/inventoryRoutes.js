@@ -1,0 +1,22 @@
+const express = require("express");
+const { getInventory, updateInventory, deleteInventoryItem } = require("../controllers/inventory.controller");
+
+const router = express.Router();
+
+// Basic sell memo
+// GET /api/inventory
+// GET /api/inventory?id=68e154c4a8b036cdc42a6de8
+// GET /api/inventory?search=daal
+router.get("/", getInventory);
+
+// PUT /api/inventory/68e154c4a8b036cdc42a6de8
+// {
+//   "stock_qty": 75,
+//   "sell_price": 7
+// }
+
+router.put("/:id", updateInventory);
+router.delete("/:id", deleteInventoryItem);
+
+
+module.exports = router;

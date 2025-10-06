@@ -99,3 +99,9 @@ app.use("/api/suppliers", supplierRoutes);
 
 const transactionRoutes = require("./routes/transactionRoutes");
 app.use("/api/transactions", transactionRoutes);
+
+const inventoryRoutes = require("./routes/inventoryRoutes");
+app.use("/api/inventory", inventoryRoutes);
+
+const cashRoutes = require("./routes/cashRoutes");
+app.use("/api/cash", cashRoutes);
