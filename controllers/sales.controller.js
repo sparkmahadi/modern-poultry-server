@@ -1,9 +1,13 @@
 const { ObjectId } = require("mongodb");
-const { subtractFromInventory, increaseCash, deductFromInventory } = require("../utils/cashAndInventory.js");
+const { subtractFromInventory, increaseCash, deductFromInventory, addToInventory } = require("../utils/cashAndInventory.js");
 const { updateCustomerBalance } = require("../utils/customerService.js");
 const { db } = require("../db.js");
 
-const salesCollection = db.collection("sales")
+const salesCol = db.collection("sales");
+const transactionsCol = db.collection("transactions");
+const cashCol = db.collection("cash");
+const customersCol = db.collection("customers");
+
 
 // module.exports.createSell = async (req, res) => {
 //   console.log('hit createsell');
@@ -102,26 +106,31 @@ module.exports.createSell = async (req, res) => {
   const memoId = new ObjectId();
   const sellDate = date ? new Date(date) : new Date();
 
-  try {
-    const salesCol = db.collection("sales");
-    const transactionsCol = db.collection("transactions");
-    const cashCol = db.collection("cash");
+  // To track all steps for manual rollback if any step fails
+  const rollbackOps = [];
 
-    // 1️⃣ Deduct sold quantity from inventory
+  try {
+    // STEP 1️⃣: Deduct sold quantities from inventory
     for (const item of products) {
       await deductFromInventory(item, memoId.toString());
     }
+    rollbackOps.push(async () => {
+      // Optional: add a reverse function if your inventory logic supports adding back
+      for (const item of products) {
+        await addToInventory(item, memoId.toString());
+      }
+    });
 
-    // 2️⃣ Get current cash balance
+    // STEP 2️⃣: Get current cash balance
     const cashAccount = await cashCol.findOne({});
     const lastBalance = cashAccount?.current_balance || 0;
     let newBalance = lastBalance;
 
-    // 3️⃣ Record cash transaction if paid
-    if (paidAmount && paidAmount > 0) {
+    // STEP 3️⃣: Record transaction (only if some cash was received)
+    if (paidAmount > 0) {
       newBalance = lastBalance + paidAmount;
 
-      await transactionsCol.insertOne({
+      const transactionData = {
         date: sellDate,
         time: sellDate.toTimeString().split(" ")[0],
         entry_source: "sale_memo",
@@ -131,45 +140,71 @@ module.exports.createSell = async (req, res) => {
         products,
         amount: paidAmount,
         balance_after_transaction: newBalance,
-        payment_details: {
-          paidAmount,
-          due,
-          paymentType: "cash"
-        },
+        payment_details: { paidAmount, due, paymentType: "cash" },
         created_by: "admin",
         remarks: "Auto entry from sale memo"
-      });
+      };
 
-      // 4️⃣ Update cash balance
+      await transactionsCol.insertOne(transactionData);
+      rollbackOps.push(() => transactionsCol.deleteOne({ memo_id: memoId.toString() }));
+
       await cashCol.updateOne({}, { $set: { current_balance: newBalance } }, { upsert: true });
+      rollbackOps.push(() => cashCol.updateOne({}, { $set: { current_balance: lastBalance } }));
     }
 
-    // 5️⃣ Record the sale memo
-    const result = await salesCol.insertOne({
+    // STEP 4️⃣: Record the sale memo
+    const saleData = {
       _id: memoId,
       memoNo,
       date: sellDate,
-      customerId: customer._id,
+      customerId: new ObjectId(customer._id),
       customerName: customer.name,
       products,
       total,
       paidAmount,
       due,
       createdAt: new Date()
-    });
+    };
 
-    if (result.acknowledged) {
-      res.status(201).json({
-        success: true,
-        message: "Sell memo created successfully",
-        memoId
-      });
-    } else {
-      res.status(400).json({ success: false, message: "Failed to record sale memo" });
-    }
+    await salesCol.insertOne(saleData);
+    rollbackOps.push(() => salesCol.deleteOne({ _id: memoId }));
+
+    // STEP 5️⃣: Update Customer Profile
+    const purchasedProductNames = products.map((p) => p.item_name);
+
+    await customersCol.updateOne(
+      { _id: new ObjectId(customer._id) },
+      {
+        $set: { last_purchase_date: sellDate },
+        $inc: { total_sales: total, total_due: due * 1 },
+        $addToSet: { purchased_products: { $each: purchasedProductNames } },
+      },
+      { upsert: false }
+    );
+
+    // STEP 6️⃣: (Optional) Update reports
+    // await reportsCol.updateOne(...)
+
+    // ✅ Success
+    res.status(201).json({
+      success: true,
+      message: "Sell memo created successfully",
+      memoId,
+      newCashBalance: newBalance
+    });
 
   } catch (err) {
     console.error("❌ Error creating sell memo:", err);
+
+    // 🔁 Rollback previous successful steps in reverse order
+    for (const undo of rollbackOps.reverse()) {
+      try {
+        await undo();
+      } catch (rollbackError) {
+        console.error("Rollback step failed:", rollbackError);
+      }
+    }
+
     res.status(500).json({ success: false, error: err.message });
   }
 };
@@ -178,7 +213,7 @@ module.exports.createSell = async (req, res) => {
 
 module.exports.getSales = async (req, res) => {
   try {
-    const sales = await salesCollection.find({}).toArray();
+    const sales = await salesCol.find({}).toArray();
     res.status(200).json({ success: true, data: sales });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

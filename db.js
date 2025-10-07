@@ -25,4 +25,4 @@ async function connectToDB() {
     }
 }
 
-module.exports = { connectToDB, db: client.db(dbName)}
+module.exports = { connectToDB, db: client.db(dbName), client}

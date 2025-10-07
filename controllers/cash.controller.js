@@ -33,7 +33,6 @@ exports.addCash = async (req, res) => {
         name: "Main Cash Account",
         currency: "BDT",
         balance: 0,
-        current_balance: 0,
         last_updated: new Date(),
         remarks: "Main farm cash account"
       };
@@ -41,11 +40,11 @@ exports.addCash = async (req, res) => {
     }
 
     // 2️⃣ Update balance
-    const newBalance = (cashAccount.current_balance || 0) + amount;
+    const newBalance = (cashAccount.balance || 0) + amount;
 
     await cashCol.updateOne(
       { _id: cashAccount._id },
-      { $set: { balance: newBalance, current_balance: newBalance, last_updated: new Date() } }
+      { $set: { balance: newBalance, last_updated: new Date() } }
     );
 
     // 3️⃣ Record transaction
@@ -86,7 +85,7 @@ exports.withdrawCash = async (req, res) => {
       return res.status(400).json({ success: false, message: "No cash account found" });
     }
 
-    const currentBalance = cashAccount.current_balance || 0;
+    const currentBalance = cashAccount.balance || 0;
 
     if (amount > currentBalance) {
       return res.status(400).json({ success: false, message: "Insufficient cash balance" });
@@ -97,7 +96,7 @@ exports.withdrawCash = async (req, res) => {
     // 2️⃣ Update balance
     await cashCol.updateOne(
       { _id: cashAccount._id },
-      { $set: { balance: newBalance, current_balance: newBalance, last_updated: new Date() } }
+      { $set: { balance: newBalance, balance: newBalance, last_updated: new Date() } }
     );
 
     // 3️⃣ Record transaction

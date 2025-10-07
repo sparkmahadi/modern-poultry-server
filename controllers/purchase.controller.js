@@ -5,11 +5,13 @@ const { db } = require("../db.js");
 const purchasesCol = db.collection("purchases");
 const transactionsCol = db.collection("transactions");
 const cashCol = db.collection("cash");
+const suppliersCol = db.collection("suppliers");
 
-// CREATE Purchase (already provided)
+
 async function createPurchase(req, res) {
-  const { products, totalAmount, paymentType = "cash", paidAmount = 0, supplierId } = req.body;
-console.log(req.body);
+  const { products, total_amount, paymentType = "cash", advance = 0, supplierId } = req.body;
+  console.log(req.body);
+
   if (!products || products.length === 0) {
     return res.status(400).json({ success: false, error: "No products provided" });
   }
@@ -18,39 +20,38 @@ console.log(req.body);
   const purchaseDate = new Date();
 
   try {
-    // 1️⃣ Add products to inventory
-    // for (const item of products) {
-    //   await addToInventory(item, invoiceId);
-    // }
+    // Initialize rollback record
+    const rollbackOps = [];
 
-    // 2️⃣ Handle cash and supplier due
-    let supplierDue = 0;
-    const cashAccount = await cashCol.findOne({});
-    const lastBalance = cashAccount?.current_balance || 0;
+    // STEP 1️⃣: Create Purchase Record
+    const paidAmount = advance;
+    const supplierDue = total_amount - paidAmount;
+
+    const purchaseData = {
+      _id: invoiceId,
+      supplierId: supplierId ? new ObjectId(supplierId) : null,
+      products,
+      totalAmount: total_amount,
+      paidAmount,
+      supplierDue,
+      paymentType,
+      date: purchaseDate,
+    };
+
+    await purchasesCol.insertOne(purchaseData);
+    rollbackOps.push(() => purchasesCol.deleteOne({ _id: invoiceId }));
+
+    // STEP 2️⃣: Handle Cash Transaction
+    let cashAccount = await cashCol.findOne({});
+    const lastBalance = cashAccount?.balance || 0;
     let newBalance = lastBalance;
 
     if (paymentType === "cash") {
-      newBalance = lastBalance - totalAmount;
-      await transactionsCol.insertOne({
+      newBalance = lastBalance - paidAmount;
+      const transactionData = {
         date: purchaseDate,
         time: purchaseDate.toTimeString().split(" ")[0],
         entry_source: "invoice",
-        invoice_id: invoiceId.toString(),
-        transaction_type: "debit",
-        particulars: `Purchase - ${products.map((p) => `${p.name} x ${p.qty}`).join(", ")}`,
-        products,
-        amount: totalAmount,
-        balance_after_transaction: newBalance,
-        payment_details: { paidAmount: totalAmount, supplierDue: 0, paymentType },
-        created_by: "admin",
-      });
-    } else if (paymentType === "partial") {
-      newBalance = lastBalance - paidAmount;
-      supplierDue = totalAmount - paidAmount;
-      await transactionsCol.insertOne({
-        date: purchaseDate,
-        time: purchaseDate.toTimeString().split(" ")[0],
-        entry_source: "purchase_invoice",
         invoice_id: invoiceId.toString(),
         transaction_type: "debit",
         particulars: `Purchase - ${products.map((p) => `${p.name} x ${p.qty}`).join(", ")}`,
@@ -59,37 +60,74 @@ console.log(req.body);
         balance_after_transaction: newBalance,
         payment_details: { paidAmount, supplierDue, paymentType },
         created_by: "admin",
-        remarks: "Auto entry from purchase invoice",
-      });
-    } else if (paymentType === "debt") {
-      supplierDue = totalAmount;
-    } else {
-      return res.status(400).json({ success: false, error: "Invalid payment type" });
+      };
+
+      await transactionsCol.insertOne(transactionData);
+      rollbackOps.push(() => transactionsCol.deleteOne({ invoice_id: invoiceId.toString() }));
+
+      await cashCol.updateOne({}, { $set: { balance: newBalance } }, { upsert: true });
+      rollbackOps.push(() => cashCol.updateOne({}, { $set: { balance: lastBalance } }));
     }
 
-    // 3️⃣ Update cash balance if applicable
-    if (paymentType === "cash" || paymentType === "partial") {
-      await cashCol.updateOne({}, { $set: { current_balance: newBalance } }, { upsert: true });
+    // STEP 3️⃣: Update Inventory
+    for (const product of products) {
+      await addToInventory(product, invoiceId);
     }
 
-    // 4️⃣ Save purchase
-    await purchasesCol.insertOne({
-      _id: invoiceId,
-      supplierId: supplierId ? new ObjectId(supplierId) : null,
-      products,
-      totalAmount,
-      paidAmount,
-      supplierDue,
-      paymentType,
-      date: purchaseDate,
+    // STEP 4️⃣: Update Supplier Profile
+    if (supplierId) {
+      const supplierObjectId = new ObjectId(supplierId);
+
+      // 4a. Add supplier purchase summary
+      await suppliersCol.updateOne(
+        { _id: supplierObjectId },
+        {
+          $set: { last_purchase_date: purchaseDate },
+          $inc: { total_purchase: total_amount, total_due: supplierDue },
+          $setOnInsert: { status: "active" },
+        }
+      );
+
+      // 4b. Add purchased products to supplier’s product list
+      const purchasedProductNames = products.map((p) => p.name);
+      await suppliersCol.updateOne(
+        { _id: supplierObjectId },
+        {
+          $addToSet: {
+            supplied_products: { $each: purchasedProductNames },
+          },
+        }
+      );
+    }
+
+    // STEP 5️⃣: (Optional) Update Reports Here
+    // await reportsCol.updateOne(...)
+
+    res.status(201).json({
+      success: true,
+      message: "Purchase processed successfully",
+      invoiceId,
+      newCashBalance: newBalance,
     });
-
-    res.status(201).json({ success: true, message: "Purchase recorded", invoiceId, newCashBalance: newBalance });
   } catch (err) {
-    console.error(err);
+    console.error("❌ Transaction failed:", err);
+
+    // Rollback partial steps if anything fails
+    for (const undo of rollbackOps.reverse()) {
+      try {
+        await undo();
+      } catch (rollbackError) {
+        console.error("Rollback step failed:", rollbackError);
+      }
+    }
+
     res.status(500).json({ success: false, error: err.message });
   }
 }
+
+
+
+
 
 // GET all purchases
 async function getPurchases(req, res) {
