@@ -25,7 +25,7 @@ async function createPurchase(req, res) {
 
     // STEP 1️⃣: Create Purchase Record
     const paidAmount = advance;
-    const supplierDue = total_amount - paidAmount;
+    const payment_due = total_amount - paidAmount;
 
     const purchaseData = {
       _id: invoiceId,
@@ -33,7 +33,7 @@ async function createPurchase(req, res) {
       products,
       totalAmount: total_amount,
       paidAmount,
-      supplierDue,
+      payment_due,
       paymentType,
       date: purchaseDate,
     };
@@ -58,13 +58,13 @@ async function createPurchase(req, res) {
         products,
         amount: paidAmount,
         balance_after_transaction: newBalance,
-        payment_details: { paidAmount, supplierDue, paymentType },
+        payment_details: { paidAmount, supplierDue: payment_due, paymentType },
         created_by: "admin",
       };
 
       await transactionsCol.insertOne(transactionData);
       rollbackOps.push(() => transactionsCol.deleteOne({ invoice_id: invoiceId.toString() }));
-
+      console.log('new balance before update cash', newBalance);
       await cashCol.updateOne({}, { $set: { balance: newBalance } }, { upsert: true });
       rollbackOps.push(() => cashCol.updateOne({}, { $set: { balance: lastBalance } }));
     }
@@ -83,7 +83,7 @@ async function createPurchase(req, res) {
         { _id: supplierObjectId },
         {
           $set: { last_purchase_date: purchaseDate },
-          $inc: { total_purchase: total_amount, total_due: supplierDue },
+          $inc: { total_purchase: total_amount, total_due: payment_due },
           $setOnInsert: { status: "active" },
         }
       );
@@ -141,17 +141,142 @@ async function getPurchases(req, res) {
 
 // GET single purchase by ID
 async function getPurchaseById(req, res) {
+  const purchase_id = req.params.id;
+  if (purchase_id) {
+    try {
+      const purchase = await purchasesCol.findOne({ _id: new ObjectId(req.params.id) });
+      console.log(purchase);
+      if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
+      res.status(200).json({ success: true, data: purchase });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  } else {
+    res.json({ success: false, message: 'purchase id not found' })
+  }
+
+}
+
+
+// 📦 UPDATE PURCHASE
+async function updatePurchase(req, res) {
   try {
-    const purchase = await purchasesCol.findOne({ _id: new ObjectId(req.params.id) });
-    if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
-    res.status(200).json({ success: true, data: purchase });
+    console.log("🟢 [UPDATE PURCHASE] Request received");
+
+    const purchaseId = new ObjectId(req.params.id);
+    const { products, totalAmount, paidAmount, paymentType, supplierId } = req.body;
+
+    console.log("🟡 Purchase ID:", purchaseId);
+    console.log("🟡 Request Body:", req.body);
+
+    const existingPurchase = await purchasesCol.findOne({ _id: purchaseId });
+    if (!existingPurchase) {
+      console.error("❌ Purchase not found");
+      return res.status(404).json({ success: false, message: "Purchase not found" });
+    }
+
+    console.log("🟢 Existing purchase fetched successfully");
+
+    // 🔹 1️⃣ Revert old inventory
+    console.log("🟠 Reverting inventory for old products...");
+    for (const item of existingPurchase.products || []) {
+      console.log(`   ↪ Reverting inventory for: ${item.name || "Unnamed product"}`);
+      const result = await deductFromInventory(item, purchaseId);
+      if (!result.success) {
+        console.error("❌ Failed during revert:", result.message);
+        return res.status(400).json({ success: false, message: `Revert failed: ${result.message}` });
+      }
+    }
+
+    // 🔹 2️⃣ Revert old cash if previous payment was cash
+    const oldPaid = existingPurchase.paidAmount || 0;
+    const oldPaymentType = existingPurchase.paymentType;
+    if (oldPaid && oldPaymentType === "cash") {
+      console.log(`🟠 Reverting old cash transaction: ${oldPaid}`);
+      const result = await decreaseCash(oldPaid, "invoice", {
+        invoiceId: purchaseId,
+        products: existingPurchase.products,
+        paymentDetails: { paidAmount: oldPaid, supplierDue: existingPurchase.totalAmount - oldPaid, paymentType: oldPaymentType },
+      });
+      if (!result.success) {
+        console.error("❌ Failed to revert old cash:", result.message);
+        return res.status(400).json({ success: false, message: `Failed to revert old cash: ${result.message}` });
+      }
+    }
+
+    // 🔹 3️⃣ Revert old supplier totals
+    if (existingPurchase.supplierId) {
+      const supplierObjId = new ObjectId(existingPurchase.supplierId);
+      const totalOldPurchase = existingPurchase.totalAmount || 0;
+      const totalOldDue = (existingPurchase.totalAmount || 0) - (existingPurchase.paidAmount || 0);
+
+      await suppliersCol.updateOne(
+        { _id: supplierObjId },
+        { $inc: { total_purchase: -totalOldPurchase, total_due: -totalOldDue }, $set: { last_purchase_date: new Date() } }
+      );
+
+      console.log("🟠 Reverted old supplier totals");
+    }
+
+    // 🔹 4️⃣ Add new inventory
+    console.log("🟢 Updating inventory for new products...");
+    for (const item of products || []) {
+      const result = await addToInventory(item, purchaseId);
+      if (!result.success) {
+        console.error("❌ Failed while adding inventory:", result.message);
+        return res.status(400).json({ success: false, message: `Add failed: ${result.message}` });
+      }
+    }
+
+    // 🔹 5️⃣ Record new cash if payment is cash
+    if (paidAmount && paymentType === "cash") {
+      console.log(`🟢 Recording new cash transaction: ${paidAmount}`);
+      const result = await decreaseCash(paidAmount, "invoice", {
+        invoiceId: purchaseId,
+        products,
+        paymentDetails: { paidAmount, supplierDue: totalAmount - paidAmount, paymentType },
+      });
+      if (!result.success) {
+        console.error("❌ Failed to record new cash:", result.message);
+        return res.status(400).json({ success: false, message: `Failed to record cash: ${result.message}` });
+      }
+    }
+
+    // 🔹 6️⃣ Update supplier totals
+    if (supplierId) {
+      const supplierObjId = new ObjectId(supplierId);
+      const supplierDue = totalAmount - paidAmount;
+
+      await suppliersCol.updateOne(
+        { _id: supplierObjId },
+        { $inc: { total_purchase: totalAmount, total_due: supplierDue }, $set: { last_purchase_date: new Date() } }
+      );
+
+      console.log("🟢 Supplier totals updated");
+    }
+
+    // 🔹 7️⃣ Update purchase record
+    await purchasesCol.updateOne(
+      { _id: purchaseId },
+      { $set: { products, totalAmount, paidAmount, paymentType, supplierId: supplierId ? new ObjectId(supplierId) : null, date: new Date() } }
+    );
+
+    console.log("✅ Purchase record updated successfully");
+
+    res.status(200).json({ success: true, message: "Purchase updated successfully", updatedPurchaseId: purchaseId });
+
   } catch (err) {
+    console.error("❌ [UPDATE PURCHASE ERROR]:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 }
 
+
+
+
+
 // UPDATE purchase
-async function updatePurchase(req, res) {
+async function paySupplierDue(req, res) {
   try {
     const purchaseId = new ObjectId(req.params.id);
     const { products, totalAmount, paidAmount, paymentType, supplierId } = req.body;
