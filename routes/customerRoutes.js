@@ -5,12 +5,14 @@ const {
   updateCustomer,
   deleteCustomer,
   searchCustomers,
+  getCustomerById,
 } = require("../controllers/customer.controller");
 
 const router = express.Router();
 
 router.post("/", createCustomer);
 router.get("/", getCustomers);
+router.get("/:id", getCustomerById);
 router.get("/search", searchCustomers);
 router.put("/:id", updateCustomer);
 router.delete("/:id", deleteCustomer);

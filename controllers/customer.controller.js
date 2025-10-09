@@ -40,7 +40,17 @@ exports.getCustomers = async (req, res) => {
   }
 };
 
-// controllers/customer.controller.js
+// Get all customers
+exports.getCustomerById = async (req, res) => {
+  const id = req.params.id;
+  // console.log(id);
+  try {
+    const customer = await db.collection("customers").findOne({ _id: new ObjectId(id) });
+    res.status(200).json({ success: true, data: customer });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
 
 exports.searchCustomers = async (req, res) => {
@@ -74,8 +84,8 @@ exports.searchCustomers = async (req, res) => {
 // Update a customer
 exports.updateCustomer = async (req, res) => {
   const { id } = req.params;
-  const {_id, ...updateData} = req.body;
-console.log(updateData);
+  const { _id, ...updateData } = req.body;
+  console.log(updateData);
   try {
     const result = await db.collection("customers").updateOne(
       { _id: new ObjectId(id) },
