@@ -11,7 +11,28 @@ const { connectToDB } = require('./db');
 const app = express();
 const port = process.env.PORT || 5000;
 
-app.use(cors());
+// ✅ Setup CORS properly
+const allowedOrigins = [
+  'https://modern-poultry-client.vercel.app',
+  'http://localhost:3000',
+];
+
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    credentials: true,
+  })
+);
+
+// ✅ Handle preflight (important for POST/PUT/DELETE)
+app.options('*', cors());
+
 app.use(express.json({ limit: '10mb' }));
 
 // Connect to MongoDB
