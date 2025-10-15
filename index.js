@@ -24,6 +24,10 @@ connectToDB()
   });
 
 
+const { ObjectId } = require('mongodb');
+const { db } = require('./db');
+const usersCollection = db.collection("users");
+
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const purchaseRoutes = require('./routes/purchaseRoutes');
@@ -32,12 +36,13 @@ const productRoutes = require('./routes/productRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 const customerRoutes = require('./routes/customerRoutes');
 
-  const { ObjectId } = require('mongodb');
-  const {db} = require('./db');
-  const usersCollection = db.collection("users");
+const supplierRoutes = require("./routes/supplierRoutes");
+const transactionRoutes = require("./routes/transactionRoutes");
+const inventoryRoutes = require("./routes/inventoryRoutes");
+const cashRoutes = require("./routes/cashRoutes");
 
 
-  // Middleware to verify the JWT token
+// Middleware to verify the JWT token
 const verifyToken = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1]; // Extract token from 'Bearer token' format
   // console.log(token);
@@ -56,7 +61,7 @@ const verifyToken = (req, res, next) => {
   });
 };
 
-  // API to get user info
+// API to get user info
 app.get('/api/auth/user', verifyToken, async (req, res) => {
   try {
     const userId = req.user.id; // Assuming JWT payload has user id
@@ -93,15 +98,11 @@ app.use('/api/products', productRoutes);
 app.use('/api/customers', customerRoutes);
 
 
-const supplierRoutes = require("./routes/supplierRoutes");
 app.use("/api/suppliers", supplierRoutes);
 
 
-const transactionRoutes = require("./routes/transactionRoutes");
 app.use("/api/transactions", transactionRoutes);
 
-const inventoryRoutes = require("./routes/inventoryRoutes");
 app.use("/api/inventory", inventoryRoutes);
 
-const cashRoutes = require("./routes/cashRoutes");
 app.use("/api/cash", cashRoutes);
