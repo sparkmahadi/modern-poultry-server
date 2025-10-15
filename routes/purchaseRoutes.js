@@ -1,7 +1,7 @@
 const express = require('express');
-const router = express.Router();
 const { createPurchase, getPurchases, deletePurchase, getPurchaseById, updatePurchase } = require('../controllers/purchase.controller');
 
+const router = express.Router();
 
 // router.route("/").get(createPurchase)
 // Supplier-side purchase invoice

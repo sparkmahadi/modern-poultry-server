@@ -1,7 +1,7 @@
 const express = require('express');
-const router = express.Router();
 const categoryController = require('../controllers/categoryController');
 
+const router = express.Router();
 // Routes
 router.route('/').get(categoryController.getAllCategories).post(categoryController.addMainCategory)
 // Fetch a single category by its 'id' (e.g., /api/utilities/categories/groceries)

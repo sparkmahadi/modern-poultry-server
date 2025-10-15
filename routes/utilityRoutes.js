@@ -1,7 +1,7 @@
 const express = require('express');
-const router = express.Router();
 const utilityController = require('../controllers/utility.controller');
 
+const router = express.Router();
 // Public routes
 router.route('/categories').get(utilityController.getProductCategories)
 // .post(utilityController.postCategory);
