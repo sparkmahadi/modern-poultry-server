@@ -23,11 +23,6 @@ connectToDB()
     console.error('Error starting server:', err);
   });
 
-
-const { ObjectId } = require('mongodb');
-const { db } = require('./db');
-const usersCollection = db.collection("users");
-
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const purchaseRoutes = require('./routes/purchaseRoutes');
@@ -40,6 +35,18 @@ const supplierRoutes = require("./routes/supplierRoutes");
 const transactionRoutes = require("./routes/transactionRoutes");
 const inventoryRoutes = require("./routes/inventoryRoutes");
 const cashRoutes = require("./routes/cashRoutes");
+
+
+const { ObjectId } = require('mongodb');
+const { db } = require('./db');
+const usersCollection = db.collection("users");
+
+
+
+// Routes
+app.get('/', (req, res) => {
+  res.send('Modern Poultry by Mahadi, Server is running')
+})
 
 
 // Middleware to verify the JWT token
@@ -79,12 +86,6 @@ app.get('/api/auth/user', verifyToken, async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
-
-
-// Routes
-app.get('/', (req, res) => {
-  res.send('Modern Poultry by Mahadi, Server is running')
-})
 
 
 
