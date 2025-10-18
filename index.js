@@ -18,7 +18,7 @@ connectToDB()
   .catch((err) => console.error("❌ MongoDB connection error:", err));
 
 app.get('/', (req, res) => {
-  res.send('🚀 Modern Poultry by Mahadi — running locally or on Vercel!');
+  res.send('🚀 Modern Poultry by Mahadi — running on production!');
 });
 
 // ✅ Run locally only if not in Vercel environment
@@ -98,18 +98,18 @@ app.use('/api/products', productRoutes);
 app.use('/api/customers', customerRoutes);
 
 
-// const supplierRoutes = require("./routes/supplierRoutes");
-// app.use("/api/suppliers", supplierRoutes);
+const supplierRoutes = require("./routes/supplierRoutes");
+app.use("/api/suppliers", supplierRoutes);
 
 
-// const transactionRoutes = require("./routes/transactionRoutes");
-// app.use("/api/transactions", transactionRoutes);
+const transactionRoutes = require("./routes/transactionRoutes");
+app.use("/api/transactions", transactionRoutes);
 
-// const inventoryRoutes = require("./routes/inventoryRoutes");
-// app.use("/api/inventory", inventoryRoutes);
+const inventoryRoutes = require("./routes/inventoryRoutes");
+app.use("/api/inventory", inventoryRoutes);
 
-// const cashRoutes = require("./routes/cashRoutes");
-// app.use("/api/cash", cashRoutes);
+const cashRoutes = require("./routes/cashRoutes");
+app.use("/api/cash", cashRoutes);
 
 
 // ✅ Export for Vercel
