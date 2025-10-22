@@ -4,6 +4,7 @@ const inventoryCol = db.collection("inventory");
 
 // 📦 Get all inventory or specific product(s)
 module.exports.getInventory = async (req, res) => {
+  console.log("Hit inventory api")
   try {
     const { id, search } = req.query;
 
@@ -23,7 +24,7 @@ module.exports.getInventory = async (req, res) => {
     const inventoryData = await inventoryCol.find(query).toArray();
 
     if (!inventoryData || inventoryData.length === 0) {
-      return res.status(404).json({ success: false, message: "No inventory data found" });
+      return res.json({ success: false, message: "No inventory data found" });
     }
 
     // ✅ Success response

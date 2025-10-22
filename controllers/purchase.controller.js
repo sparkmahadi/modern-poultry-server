@@ -3,6 +3,7 @@ const { db } = require("../db.js");
 
 const purchasesCol = db.collection("purchases");
 const transactionsCol = db.collection("transactions");
+const inventoryCollection = db.collection("inventory");
 const cashCol = db.collection("cash");
 const suppliersCol = db.collection("suppliers");
 

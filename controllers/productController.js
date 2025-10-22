@@ -1,6 +1,8 @@
+const { ObjectId } = require('mongodb');
 const { db } = require('../db'); // Assuming db.js exports your MongoDB database instance
 const productsCollection = db.collection('products');
 const categoriesCollection = db.collection('categories'); // To validate category/subcategory IDs
+const inventoryCollection = db.collection('inventory'); // To validate category/subcategory IDs
 
 // Helper function to normalize _id from MongoDB's ObjectId to a string ($oid)
 const normalizeMongoId = (doc) => {
@@ -96,7 +98,29 @@ exports.addProduct = async (req, res) => {
 
         if (result.acknowledged && result.insertedId) {
             const insertedProduct = await productsCollection.findOne({ _id: result.insertedId });
-            return res.status(201).json({ success: true, data: normalizeMongoId(insertedProduct), message: 'Product added successfully.' });
+            const product = insertedProduct;
+            try {
+                console.log(`🟢 [addToInventory] Adding new inventory item: ${product.item_name}`);
+
+                // 🔹 Insert new product
+                await inventoryCollection.insertOne({
+                    product_id: new ObjectId(product.product_id),
+                    item_name: product.item_name,
+                    total_stock_qty: 0,
+                    sale_price: 0,
+                    last_purchase_price: 0,
+                    average_purchase_price: 0,
+                    reorder_level: 0,
+                    last_updated: new Date(),
+                    sale_history: []
+                });
+
+                console.log(`✅ [addToInventory] New item added: ${product.item_name}`);
+                return res.status(201).json({ success: true, data: normalizeMongoId(insertedProduct), message: 'Product added and inventory updated successfully.' });
+            } catch (err) {
+                console.error("Failed adding product to inventory:", product.item_name, err.message);
+                return res.status(201).json({ success: true, data: normalizeMongoId(insertedProduct), message: `Product added but Inventory update failed for ${product.item_name}` });
+            }
         } else {
             return res.status(500).json({ success: false, message: "Failed to add product due to an unknown database issue." });
         }
