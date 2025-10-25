@@ -3,91 +3,10 @@ const { db } = require("../db.js");
 
 const salesCol = db.collection("sales");
 const transactionsCol = db.collection("transactions");
+
+const inventoryCollection = db.collection("inventory");
 const cashCol = db.collection("cash");
 const customersCol = db.collection("customers");
-
-
-// module.exports.createSell = async (req, res) => {
-//   console.log('hit createsell');
-//   const { memoNo, date, customer, products, total, paidAmount, due } = req.body;
-
-//   if (!products || products.length === 0) {
-//     return res.status(400).json({ success: false, error: "No products provided" });
-//   }
-
-//   if (!customer || !customer.name) {
-//     return res.status(400).json({ success: false, error: "Customer information required" });
-//   }
-
-//   const memoId = new ObjectId();
-//   const sellDate = date ? new Date(date) : new Date();
-
-//   try {
-//     const salesCollection = db.collection("sales");
-//     const transactionsCol = db.collection("transactions");
-//     const cashCol = db.collection("cash");
-
-//     // 1️⃣ Update inventory (if needed)
-//     // for (const item of products) {
-//     //   await subtractFromInventory(item._id, item.qty, "Sale", memoId.toString());
-//     // }
-
-//     // 2️⃣ Get current cash balance
-//     const cashAccount = await cashCol.findOne({});
-//     const lastBalance = cashAccount?.current_balance || 0;
-
-//     // 3️⃣ Record cash transaction if paidAmount > 0
-//     let newBalance = lastBalance;
-//     if (paidAmount && paidAmount > 0) {
-//       newBalance = lastBalance + paidAmount;
-
-//       await transactionsCol.insertOne({
-//         date: sellDate,
-//         time: sellDate.toTimeString().split(' ')[0],
-//         entry_source: "sale_memo",
-//         memo_id: memoId.toString(),
-//         transaction_type: "credit",
-//         particulars: `Sale - ${products.map(p => `${p.item_name} x ${p.qty}`).join(', ')}`,
-//         products,
-//         amount: paidAmount,
-//         balance_after_transaction: newBalance,
-//         payment_details: {
-//           paidAmount,
-//           due,
-//           paymentType: "cash"
-//         },
-//         created_by: "admin", // change as needed
-//         remarks: "Auto entry from sale memo"
-//       });
-
-//       // Update cash account
-//       await cashCol.updateOne({}, { $set: { current_balance: newBalance } }, { upsert: true });
-//     }
-
-//     // 4️⃣ Record sell memo
-//     const result = await salesCollection.insertOne({
-//       _id: memoId,
-//       memoNo,
-//       date: sellDate,
-//       customerId: customer._id,
-//       customerName: customer.name,
-//       products,
-//       total,
-//       paidAmount,
-//       due,
-//       createdAt: new Date()
-//     });
-
-//     res.status(201).json({
-//       success: true,
-//       message: "Sell memo created successfully",
-//       memoId
-//     });
-//   } catch (err) {
-//     console.error("❌ Error creating sell memo:", err);
-//     res.status(500).json({ success: false, error: err.message });
-//   }
-// };
 
 module.exports.createSell = async (req, res) => {
   console.log("🧾 Hit createSell");
@@ -121,7 +40,7 @@ module.exports.createSell = async (req, res) => {
 
     // STEP 2️⃣: Get current cash balance
     const cashAccount = await cashCol.findOne({});
-    const lastBalance = cashAccount?.current_balance || 0;
+    const lastBalance = cashAccount?.balance || 0;
     let newBalance = lastBalance;
 
     // STEP 3️⃣: Record transaction (only if some cash was received)
@@ -146,8 +65,8 @@ module.exports.createSell = async (req, res) => {
       await transactionsCol.insertOne(transactionData);
       rollbackOps.push(() => transactionsCol.deleteOne({ memo_id: memoId.toString() }));
 
-      await cashCol.updateOne({}, { $set: { current_balance: newBalance } }, { upsert: true });
-      rollbackOps.push(() => cashCol.updateOne({}, { $set: { current_balance: lastBalance } }));
+      await cashCol.updateOne({}, { $set: { balance: newBalance } }, { upsert: true });
+      rollbackOps.push(() => cashCol.updateOne({}, { $set: { balance: lastBalance } }));
     }
 
     // STEP 4️⃣: Record the sale memo
@@ -223,7 +142,7 @@ module.exports.getSales = async (req, res) => {
 async function addToInventory(product, invoiceId) {
   console.log("🟢 [addToInventory] Called with:", {
     product_id: product?.product_id,
-    name: product?.name,
+    name: product?.item_name,
     qty: product?.qty,
     invoiceId
   });
@@ -232,7 +151,7 @@ async function addToInventory(product, invoiceId) {
     // 🔸 Validate product data
     if (!product || !product.product_id || !product.qty || !product.purchase_price) {
       console.error("❌ [addToInventory] Invalid product data:", product);
-      return { success: false, message: `Invalid product data for: ${product?.name || "Unnamed product"}` };
+      return { success: false, message: `Invalid product data for: ${product?.item_name || "Unnamed product"}` };
     }
 
     // 🔸 Find existing inventory item
@@ -249,7 +168,7 @@ async function addToInventory(product, invoiceId) {
     };
 
     if (existingItem) {
-      console.log(`🟡 [addToInventory] Updating existing item: ${product.name}`);
+      console.log(`🟡 [addToInventory] Updating existing item: ${product.item_name}`);
 
       // Calculate weighted average purchase price
       const oldQty = existingItem.total_stock_qty || 0;
@@ -272,15 +191,15 @@ async function addToInventory(product, invoiceId) {
         }
       );
 
-      console.log(`✅ [addToInventory] Updated inventory for ${product.name}`);
-      return { success: true, message: `Inventory updated for ${product.name}` };
+      console.log(`✅ [addToInventory] Updated inventory for ${product.item_name}`);
+      return { success: true, message: `Inventory updated for ${product.item_name}` };
     } else {
-      console.log(`🟢 [addToInventory] Adding new inventory item: ${product.name}`);
+      console.log(`🟢 [addToInventory] Adding new inventory item: ${product.item_name}`);
 
       // 🔹 Insert new product
       await inventoryCollection.insertOne({
         product_id: new ObjectId(product.product_id),
-        item_name: product.name,
+        item_name: product.item_name,
         total_stock_qty: product.qty,
         sale_price: null,
         last_purchase_price: product.purchase_price,
@@ -291,12 +210,12 @@ async function addToInventory(product, invoiceId) {
         sale_history: []
       });
 
-      console.log(`✅ [addToInventory] New item added: ${product.name}`);
-      return { success: true, message: `New inventory item added: ${product.name}` };
+      console.log(`✅ [addToInventory] New item added: ${product.item_name}`);
+      return { success: true, message: `New inventory item added: ${product.item_name}` };
     }
   } catch (error) {
     console.error("❌ [addToInventory ERROR]:", error.message);
-    return { success: false, message: `Failed to update inventory for ${product?.name || "unknown item"}: ${error.message}` };
+    return { success: false, message: `Failed to update inventory for ${product?.item_name || "unknown item"}: ${error.message}` };
   }
 }
 
@@ -310,12 +229,12 @@ async function deductFromInventory(product, memoId) {
 
     if (!productId || !product.qty) {
       console.error("❌ [deductFromInventory] Invalid product data:", product);
-      return { success: false, message: `Invalid product data for inventory deduction (${product?.name || "Unknown"})` };
+      return { success: false, message: `Invalid product data for inventory deduction (${product?.item_name || "Unknown"})` };
     }
 
     console.log("🟡 [deductFromInventory] Processing:", {
       product_id: productId,
-      name: product.name,
+      name: product?.item_name,
       qty: product.qty,
       memoId
     });
@@ -323,8 +242,8 @@ async function deductFromInventory(product, memoId) {
     const existingItem = await inventoryCollection.findOne({ product_id: new ObjectId(productId) });
 
     if (!existingItem) {
-      console.warn(`⚠️ [deductFromInventory] Product not found in inventory: ${product.name}`);
-      return { success: false, message: `Product not found in inventory: ${product.name}` };
+      console.warn(`⚠️ [deductFromInventory] Product not found in inventory: ${product?.item_name}`);
+      return { success: false, message: `Product not found in inventory: ${product?.item_name}` };
     }
 
     const saleRecord = {
@@ -345,11 +264,11 @@ async function deductFromInventory(product, memoId) {
     );
 
     if (result.modifiedCount > 0) {
-      console.log(`✅ [deductFromInventory] Deducted ${product.qty} from ${product.name}`);
-      return { success: true, message: `Inventory updated for ${product.name}` };
+      console.log(`✅ [deductFromInventory] Deducted ${product.qty} from ${product?.item_name}`);
+      return { success: true, message: `Inventory updated for ${product?.item_name}` };
     } else {
-      console.warn(`⚠️ [deductFromInventory] No change for ${product.name}`);
-      return { success: false, message: `No update occurred for ${product.name}` };
+      console.warn(`⚠️ [deductFromInventory] No change for ${product?.item_name}`);
+      return { success: false, message: `No update occurred for ${product?.item_name}` };
     }
   } catch (err) {
     console.error("❌ [deductFromInventory ERROR]:", err);
@@ -388,9 +307,10 @@ async function subtractFromInventory(productId, qty, reason, ref) {
 // ----- Cash -----
 
 async function increaseCash(amount, entrySource, details = {}) {
+  console.log('cash increase requested by', amount, entrySource, details);
   try {
     const cashAccount = await cashCol.findOne({});
-    const lastBalance = cashAccount?.current_balance || 0;
+    const lastBalance = cashAccount?.balance || 0;
     const newBalance = lastBalance + amount;
 
     // Log transaction
@@ -409,7 +329,7 @@ async function increaseCash(amount, entrySource, details = {}) {
     });
 
     // Update cash balance
-    await cashCol.updateOne({}, { $set: { current_balance: newBalance } }, { upsert: true });
+    await cashCol.updateOne({}, { $set: { balance: newBalance } }, { upsert: true });
 
     return { success: true, newBalance, message: "Cash increased successfully" };
   } catch (err) {
@@ -428,7 +348,7 @@ async function increaseCash(amount, entrySource, details = {}) {
 async function decreaseCash(amount, entrySource, details = {}) {
   try {
     const cashAccount = await cashCol.findOne({});
-    const lastBalance = cashAccount?.current_balance || 0;
+    const lastBalance = cashAccount?.balance || 0;
     const newBalance = lastBalance - amount;
 
     // Log transaction
@@ -447,7 +367,7 @@ async function decreaseCash(amount, entrySource, details = {}) {
     });
 
     // Update cash balance
-    await cashCol.updateOne({}, { $set: { current_balance: newBalance } }, { upsert: true });
+    await cashCol.updateOne({}, { $set: { balance: newBalance } }, { upsert: true });
 
     return { success: true, newBalance, message: "Cash decreased successfully" };
   } catch (err) {

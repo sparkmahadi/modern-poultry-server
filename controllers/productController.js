@@ -1,6 +1,8 @@
+const { ObjectId } = require('mongodb');
 const { db } = require('../db'); // Assuming db.js exports your MongoDB database instance
 const productsCollection = db.collection('products');
 const categoriesCollection = db.collection('categories'); // To validate category/subcategory IDs
+const inventoryCollection = db.collection('inventory'); // To validate category/subcategory IDs
 
 // Helper function to normalize _id from MongoDB's ObjectId to a string ($oid)
 const normalizeMongoId = (doc) => {
@@ -96,7 +98,7 @@ exports.addProduct = async (req, res) => {
 
         if (result.acknowledged && result.insertedId) {
             const insertedProduct = await productsCollection.findOne({ _id: result.insertedId });
-            return res.status(201).json({ success: true, data: normalizeMongoId(insertedProduct), message: 'Product added successfully.' });
+            return res.status(201).json({ success: true, data: normalizeMongoId(insertedProduct), message: `Product : ${insertedProduct.item_name} added successfully` });
         } else {
             return res.status(500).json({ success: false, message: "Failed to add product due to an unknown database issue." });
         }

@@ -5,6 +5,7 @@ const { db } = require("../db");
 exports.createCustomer = async (req, res) => {
   console.log('hit create customer');
   const { name, address, phone, type, due, advance, status } = req.body;
+  console.log(req.body)
 
   if (!name || !type) {
     return res.status(400).json({ success: false, message: "Name and type are required." });

@@ -12,9 +12,14 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// Connect to MongoDB
 connectToDB()
-  .then(() => console.log("✅ Connected to MongoDB"))
-  .catch((err) => console.error("❌ MongoDB connection error:", err));
+  .then(() => {
+    app.listen(port, () => { console.log(`Modern Poultry server is running on port ${port}`); })
+  })
+  .catch((err) => {
+    console.error('Error starting server:', err);
+  });
 
 app.get('/', (req, res) => {
   res.send('🚀 Modern Poultry by Mahadi — running on production!');
@@ -109,7 +114,3 @@ app.use("/api/inventory", inventoryRoutes);
 
 const cashRoutes = require("./routes/cashRoutes");
 app.use("/api/cash", cashRoutes);
-
-
-// ✅ Export for Vercel
-module.exports = app;
