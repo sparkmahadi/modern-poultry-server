@@ -5,7 +5,7 @@ const jwt = require("jsonwebtoken");
 
 
 const { connectToDB } = require('./db');
-
+const port = 5000 || process.env.PORT
 
 const app = express();
 

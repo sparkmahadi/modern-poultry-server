@@ -95,6 +95,7 @@ exports.deleteInventoryItem = async (req, res) => {
 exports.getStockByProductId = async (req, res) => {
   try {
     const { productId } = req.params;
+    console.log("getStockByProductId", productId);
 
     if (!productId) {
       return res.status(400).json({
@@ -120,7 +121,7 @@ exports.getStockByProductId = async (req, res) => {
 
     // If product not found in inventory
     if (!result || result.length === 0) {
-      return res.status(404).json({
+      return res.json({
         success: false,
         message: "Product not found in inventory",
         stock: 0,

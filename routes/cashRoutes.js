@@ -3,7 +3,7 @@ const { getCash, addCash, withdrawCash, createCashAccount } = require("../contro
 
 const router = express.Router();
 
-router.get("/", getCash).post(createCashAccount);
+router.get("/", getCash).post("/",createCashAccount);
 
 router.post("/add", addCash);
 router.post("/withdraw", withdrawCash);

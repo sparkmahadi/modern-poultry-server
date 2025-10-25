@@ -2,6 +2,8 @@ const { ObjectId } = require("mongodb");
 const { db } = require("../db.js");
 
 const salesCol = db.collection("sales");
+const dueSalesCol = db.collection("due-sales");
+const cashSalesCol = db.collection("cash-sales");
 const transactionsCol = db.collection("transactions");
 
 const inventoryCollection = db.collection("inventory");
@@ -86,6 +88,15 @@ module.exports.createSell = async (req, res) => {
     await salesCol.insertOne(saleData);
     rollbackOps.push(() => salesCol.deleteOne({ _id: memoId }));
 
+    // step 5
+    if (paidAmount < total) {
+      await dueSalesCol.insertOne(saleData);
+      rollbackOps.push(() => dueSalesCol.deleteOne({ _id: memoId }));
+    } else {
+      await cashSalesCol.insertOne(saleData);
+      rollbackOps.push(() => cashSalesCol.deleteOne({ _id: memoId }));
+    }
+
     // STEP 5️⃣: Update Customer Profile
     const purchasedProductNames = products.map((p) => p.item_name);
 
@@ -131,6 +142,24 @@ module.exports.createSell = async (req, res) => {
 module.exports.getSales = async (req, res) => {
   try {
     const sales = await salesCol.find({}).toArray();
+    res.status(200).json({ success: true, data: sales });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+module.exports.getCashSales = async (req, res) => {
+  try {
+    const sales = await cashSalesCol.find({}).toArray();
+    res.status(200).json({ success: true, data: sales });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+module.exports.getDueSales = async (req, res) => {
+  try {
+    const sales = await dueSalesCol.find({}).toArray();
     res.status(200).json({ success: true, data: sales });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

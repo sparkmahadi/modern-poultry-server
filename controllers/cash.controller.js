@@ -1,11 +1,13 @@
 const { ObjectId } = require("mongodb");
 const { db } = require("../db");
 
+const cashColl = db.collection("cash");
+
 // 🏦 Get all cash accounts (already provided)
 exports.getCash = async (req, res) => {
   console.log("hit getCash");
   try {
-    const cash = await db.collection("cash").find({}).toArray();
+    const cash = await cashColl.find({}).toArray();
     res.status(200).json({ success: true, data: cash });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -17,11 +19,15 @@ exports.createCashAccount = async (req, res) => {
   try {
     const cashInfo = req.body;
     console.log(cashInfo);
-
-    res.send({ success: true, message: "Successfully created" })
+    const data = await cashColl.insertOne(cashInfo);
+    if(data.acknowledged){
+      res.send({ success: true, message: "Successfully created" })
+    } else{
+      res.send({ success: false, message: "Not created" })
+    }
   } catch (error) {
     console.log(error);
-    res.status(500).json({success: false, message: "Server error"});
+    res.status(500).json({ success: false, message: "Server error" });
   }
 }
 
@@ -34,7 +40,7 @@ exports.addCash = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid amount" });
     }
 
-    const cashCol = db.collection("cash");
+    const cashCol = cashColl;
     const transactionsCol = db.collection("transactions");
 
     // 1️⃣ Get current cash account (assuming single main account)
@@ -89,7 +95,7 @@ exports.withdrawCash = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid amount" });
     }
 
-    const cashCol = db.collection("cash");
+    const cashCol = cashColl;
     const transactionsCol = db.collection("transactions");
 
     // 1️⃣ Get current cash account
