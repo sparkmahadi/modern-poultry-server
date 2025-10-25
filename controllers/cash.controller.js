@@ -1,5 +1,5 @@
 const { ObjectId } = require("mongodb");
-const {db} = require("../db");
+const { db } = require("../db");
 
 // 🏦 Get all cash accounts (already provided)
 exports.getCash = async (req, res) => {
@@ -11,6 +11,19 @@ exports.getCash = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+exports.createCashAccount = async (req, res) => {
+  console.log('hit create cash account');
+  try {
+    const cashInfo = req.body;
+    console.log(cashInfo);
+
+    res.send({ success: true, message: "Successfully created" })
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({success: false, message: "Server error"});
+  }
+}
 
 // ➕ Add cash (deposit)
 exports.addCash = async (req, res) => {

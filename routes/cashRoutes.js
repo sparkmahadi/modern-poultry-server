@@ -1,9 +1,9 @@
 const express = require("express");
-const { getCash, addCash, withdrawCash } = require("../controllers/cash.controller");
+const { getCash, addCash, withdrawCash, createCashAccount } = require("../controllers/cash.controller");
 
 const router = express.Router();
 
-router.get("/", getCash);
+router.get("/", getCash).post(createCashAccount);
 
 router.post("/add", addCash);
 router.post("/withdraw", withdrawCash);
