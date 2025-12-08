@@ -136,11 +136,26 @@ async function createPurchase(req, res) {
 
 // GET all purchases
 async function getPurchases(req, res) {
-  try {
-    const purchases = await purchasesCol.find().sort({ date: -1 }).toArray();
-    res.status(200).json({ success: true, data: purchases });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+  console.log('hit');
+  const query = req.query.type;
+  console.log(query);
+  if (query) {
+    try {
+      const purchases = await purchasesCol.find({
+        payment_due: { $gt: 0 }
+      }).sort({ date: -1 }).toArray();
+      console.log(purchases);
+      res.status(200).json({ success: true, data: purchases });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  } else {
+    try {
+      const purchases = await purchasesCol.find().sort({ date: -1 }).toArray();
+      res.status(200).json({ success: true, data: purchases });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
   }
 }
 
