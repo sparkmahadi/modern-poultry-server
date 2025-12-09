@@ -1,6 +1,6 @@
 
 const { ObjectId } = require("mongodb");
-const {db} = require("../db");
+const { db } = require("../db");
 const batchColl = db.collection("batches");
 
 
@@ -39,22 +39,19 @@ module.exports.createBatch = async (req, res) => {
 module.exports.updateBatch = async (req, res) => {
     try {
         const batchId = req.params.id;
-        const payload = req.body;
-
+        const { _id, ...payload } = req.body;
+        console.log(payload)
         if (!batchId) {
             return res.status(400).json({ message: "Batch ID is required" });
         }
 
-        const { ObjectId } = req.db;
-
         const updated = await batchColl
-            .findOneAndUpdate(
+            .updateOne(
                 { _id: new ObjectId(batchId) },
                 { $set: payload },
                 { returnDocument: "after" }
             );
-
-        if (!updated.value) {
+        if (!updated.acknowledged === 0) {
             return res.status(404).json({ message: "Batch not found" });
         }
 
@@ -104,16 +101,16 @@ module.exports.getBatches = async (req, res) => {
 module.exports.getBatchById = async (req, res) => {
     try {
         const { id } = req.params;
-        const { ObjectId } = req.db;
-
         const batch = await batchColl
             .findOne({ _id: new ObjectId(id) });
+        console.log(batch)
 
         if (!batch) {
             return res.status(404).json({ message: "Batch not found" });
         }
 
         res.status(200).json({
+            success: true,
             message: "Batch fetched successfully",
             batch,
         });
