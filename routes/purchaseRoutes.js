@@ -1,5 +1,5 @@
 const express = require('express');
-const { createPurchase, getPurchases, deletePurchase, getPurchaseById, updatePurchase } = require('../controllers/purchase.controller');
+const { createPurchase, getPurchases, deletePurchase, getPurchaseById, updatePurchase, paySupplierDue } = require('../controllers/purchase.controller');
 
 const router = express.Router();
 
@@ -8,6 +8,7 @@ const router = express.Router();
 router.get("/", getPurchases);
 router.get("/:id", getPurchaseById);
 router.put("/:id", updatePurchase);
+router.patch("/pay/:id", paySupplierDue);
 router.delete("/:id", deletePurchase);
 router.post("/", createPurchase);
 
