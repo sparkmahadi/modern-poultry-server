@@ -166,6 +166,64 @@ module.exports.getDueSales = async (req, res) => {
   }
 }
 
+// Get a single sale by ID
+module.exports.getSaleById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ success: false, message: "Sale ID required" });
+
+    const sale = await salesCol.findOne({ _id: new ObjectId(id) });
+
+    if (!sale) {
+      return res.status(404).json({ success: false, message: "Sale not found" });
+    }
+
+    res.status(200).json({
+      success: true,
+      sale
+    });
+  } catch (error) {
+    console.error("getSaleById Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching sale",
+      error: error.message
+    });
+  }
+};
+
+// Update a sale
+module.exports.updateSaleById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const payload = req.body;
+
+    if (!id) return res.status(400).json({ success: false, message: "Sale ID required" });
+
+    const updated = await salesCol.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: payload }
+    );
+
+    if (updated.matchedCount === 0) {
+      return res.status(404).json({ success: false, message: "Sale not found" });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Sale updated successfully"
+    });
+  } catch (error) {
+    console.error("updateSaleById Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error updating sale",
+      error: error.message
+    });
+  }
+};
+
+
 
 // 🟢 Add purchased products to inventory
 async function addToInventory(product, invoiceId) {

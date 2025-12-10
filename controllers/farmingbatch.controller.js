@@ -2,6 +2,7 @@
 const { ObjectId } = require("mongodb");
 const { db } = require("../db");
 const batchColl = db.collection("batches");
+const salesColl = db.collection("sales");
 
 
 // ---------------------------------------------
@@ -69,6 +70,90 @@ module.exports.updateBatch = async (req, res) => {
     }
 };
 
+module.exports.addSellHistory = async (req, res) => {
+    try {
+        const { memoId, batchId } = req.body;
+        console.log(memoId, batchId);
+        if (!memoId || !batchId) {
+            return res.status(400).json({
+                success: false,
+                message: "memoId and batchId are required"
+            });
+        }
+
+        const updated = await batchColl.updateOne(
+            { _id: new ObjectId(batchId) },
+            { $push: { salesHistoryIds: new ObjectId(memoId) } }
+        );
+
+        if (updated.matchedCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Batch not found"
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "Sale history added to batch successfully",
+            batchId
+        });
+
+    } catch (error) {
+        console.error("addSellHistory Error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Server error while adding sell history",
+            error: error.message,
+        });
+    }
+};
+
+module.exports.removeASellHistoryId = async (req, res) => {
+    try {
+        const { batchId, memoId } = req.body;
+
+        if (!batchId || !memoId) {
+            return res.status(400).json({
+                success: false,
+                message: "batchId and memoId are required"
+            });
+        }
+
+        const updated = await batchColl.updateOne(
+            { _id: new ObjectId(batchId) },
+            { $pull: { salesHistoryIds: new ObjectId(memoId) } }
+        );
+
+        if (updated.matchedCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Batch not found"
+            });
+        }
+
+        if (updated.modifiedCount === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "memoId not found in salesHistoryIds"
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "Sale history removed successfully",
+            batchId
+        });
+
+    } catch (error) {
+        console.error("removeSellHistory Error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Server error while removing sale history",
+            error: error.message
+        });
+    }
+};
 
 
 // GET ALL BATCHES
@@ -94,6 +179,61 @@ module.exports.getBatches = async (req, res) => {
     }
 };
 
+
+module.exports.getBatchSales = async (req, res) => {
+    try {
+        const batchId = req.params.batchId;
+
+        if (!batchId) {
+            return res.status(400).json({
+                success: false,
+                message: "Batch ID is required",
+            });
+        }
+
+        // 1. Fetch the batch
+        const batch = await batchColl.findOne({ _id: new ObjectId(batchId) });
+
+        if (!batch) {
+            return res.status(404).json({
+                success: false,
+                message: "Batch not found",
+            });
+        }
+
+        // 2. If empty or missing
+        if (!batch.salesHistoryIds || batch.salesHistoryIds.length === 0) {
+            return res.status(200).json({
+                success: true,
+                message: "No sales found for this batch",
+                sales: [],
+            });
+        }
+
+        // Convert raw ObjectIds into actual ObjectId list
+        const saleIds = batch.salesHistoryIds.map(id => new ObjectId(id));
+
+        // 3. Fetch sales documents linked to this batch
+        const sales = await salesColl
+            .find({ _id: { $in: saleIds } })
+            .sort({ date: -1 })
+            .toArray();
+
+        return res.status(200).json({
+            success: true,
+            message: "Sales fetched successfully",
+            sales,
+        });
+
+    } catch (error) {
+        console.error("Get Batch Sales Error:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Server error while fetching batch sales",
+            error: error.message,
+        });
+    }
+};
 
 
 // GET SINGLE BATCH BY ID
