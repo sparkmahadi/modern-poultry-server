@@ -148,6 +148,17 @@ module.exports.getSales = async (req, res) => {
   }
 }
 
+module.exports.getSalesByCustomerId = async (req, res) => {
+  console.log('hit', req.params);
+  const {customerId} = req.params;
+  try {
+    const sales = await salesCol.find({customerId: new ObjectId(customerId)}).toArray();
+    res.status(200).json({ success: true, data: sales });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+}
+
 module.exports.getCashSales = async (req, res) => {
   try {
     const sales = await cashSalesCol.find({}).toArray();

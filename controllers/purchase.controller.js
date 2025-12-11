@@ -10,19 +10,32 @@ const suppliersCol = db.collection("suppliers");
 // -------------------- CREATE PURCHASE --------------------
 async function createPurchase(req, res) {
   const { products, total_amount, paymentType = "cash", advance = 0, supplierId } = req.body;
-  console.log(req.body);
 
-  if (!products || products.length === 0) {
-    return res.status(400).json({ success: false, error: "No products provided" });
+  if (!products || !products.length) {
+    return res.status(400).json({
+      success: false,
+      error: "Products array is required and cannot be empty",
+    });
+  }
+
+  // Validate each product before doing anything else
+  for (const p of products) {
+    const pid = extractProductId(p.product_id);
+    if (!pid) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid product_id for product: ${p.name}`,
+      });
+    }
   }
 
   const invoiceId = new ObjectId();
   const purchaseDate = new Date();
 
+  const rollbackOps = [];
   try {
-    const rollbackOps = [];
 
-    // STEP 1️⃣: Create Purchase Record
+    // ----- STEP 1: Insert Purchase Record -----
     const paidAmount = advance;
     const payment_due = total_amount - paidAmount;
 
@@ -40,20 +53,22 @@ async function createPurchase(req, res) {
     await purchasesCol.insertOne(purchaseData);
     rollbackOps.push(() => purchasesCol.deleteOne({ _id: invoiceId }));
 
-    // STEP 2️⃣: Handle Cash Transaction
+    // ----- STEP 2: Cash Handling -----
     let cashAccount = await cashCol.findOne({});
     const lastBalance = cashAccount?.balance || 0;
+
     let newBalance = lastBalance;
 
     if (paymentType === "cash") {
       newBalance = lastBalance - paidAmount;
+
       const transactionData = {
         date: purchaseDate,
         time: purchaseDate.toTimeString().split(" ")[0],
         entry_source: "invoice",
         invoice_id: invoiceId.toString(),
         transaction_type: "debit",
-        particulars: `Purchase - ${products.map((p) => `${p.name} x ${p.qty}`).join(", ")}`,
+        particulars: `Purchase - ${products.map(p => `${p.name} x ${p.qty}`).join(", ")}`,
         products,
         amount: paidAmount,
         balance_after_transaction: newBalance,
@@ -63,46 +78,40 @@ async function createPurchase(req, res) {
 
       await transactionsCol.insertOne(transactionData);
       rollbackOps.push(() => transactionsCol.deleteOne({ invoice_id: invoiceId.toString() }));
+
       await cashCol.updateOne({}, { $set: { balance: newBalance } }, { upsert: true });
       rollbackOps.push(() => cashCol.updateOne({}, { $set: { balance: lastBalance } }));
     }
 
-    // STEP 3️⃣: Update Inventory
+    // ----- STEP 3: Inventory Update -----
     for (const product of products) {
-      try {
-        await addToInventory(product, invoiceId);
-      } catch (err) {
-        console.error("Failed adding product to inventory:", product.name, err.message);
-        throw new Error(`Inventory update failed for ${product.name}`);
+      const result = await addToInventory(product, invoiceId);
+
+      if (!result.success) {
+        console.error("Inventory error:", result.message);
+        throw new Error(result.message);
       }
     }
 
-    // STEP 4️⃣: Update Supplier Profile
+    // ----- STEP 4: Supplier Update -----
     if (supplierId) {
       const supplierObjectId = new ObjectId(supplierId);
 
-      // 4a. Update supplier totals
       await suppliersCol.updateOne(
         { _id: supplierObjectId },
         {
           $set: { last_purchase_date: purchaseDate },
           $inc: { total_purchase: total_amount, total_due: payment_due },
-          $setOnInsert: { status: "active" },
         }
       );
 
-      // 4b. Add purchased products to supplier’s product list
-      const purchasedProductNames = products.map((p) => p.name);
+      const purchasedProductNames = products.map(p => p.name);
+
       await suppliersCol.updateOne(
         { _id: supplierObjectId },
-        {
-          $addToSet: {
-            supplied_products: { $each: purchasedProductNames },
-          },
-        }
+        { $addToSet: { supplied_products: { $each: purchasedProductNames } } }
       );
 
-      // 4c. Add supplier transaction history
       await suppliersCol.updateOne(
         { _id: supplierObjectId },
         {
@@ -112,34 +121,41 @@ async function createPurchase(req, res) {
               type: "purchase",
               purchase_id: invoiceId,
               products,
-              total_amount: total_amount,
+              total_amount,
               paid_amount: paidAmount,
               due_after_payment: payment_due,
-              remarks: "New purchase created"
-            }
-          }
+              remarks: "New purchase created",
+            },
+          },
         }
       );
     }
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: "Purchase processed successfully",
       invoiceId,
       newCashBalance: newBalance,
     });
+
   } catch (err) {
-    console.error("❌ Transaction failed:", err);
+    console.error("Transaction failed:", err.message);
+
     for (const undo of rollbackOps.reverse()) {
       try {
         await undo();
       } catch (rollbackError) {
-        console.error("Rollback step failed:", rollbackError);
+        console.error("Rollback failed:", rollbackError);
       }
     }
-    res.status(500).json({ success: false, error: err.message });
+
+    return res.status(500).json({
+      success: false,
+      error: err.message,
+    });
   }
 }
+
 
 // -------------------- GET PURCHASES --------------------
 async function getPurchases(req, res) {
@@ -270,7 +286,7 @@ async function updatePurchase(req, res) {
 async function paySupplierDue(req, res) {
   try {
     const purchaseId = new ObjectId(req.params.id);
-    const { payAmount, paymentMethod } = req.body;
+    const { payAmount, paymentMethod="cash" } = req.body;
 
     if (!payAmount || payAmount <= 0) return res.status(400).json({ success: false, message: "Invalid payment amount." });
 
@@ -356,36 +372,61 @@ async function deletePurchase(req, res) {
 // -------------------- INVENTORY HELPERS --------------------
 async function addToInventory(product, invoiceId) {
   try {
-    if (!product || !product.product_id || !product.qty || !product.purchase_price) {
-      return { success: false, message: `Invalid product data for: ${product?.name || "Unnamed product"}` };
+    const pid = extractProductId(product.product_id);
+
+    if (!pid) {
+      return {
+        success: false,
+        message: `Invalid product_id for: ${product?.name}`,
+      };
     }
 
-    const existingItem = await inventoryCollection.findOne({ product_id: new ObjectId(product.product_id) });
+    const productObjectId = new ObjectId(pid);
+
+    if (!product.qty || !product.purchase_price) {
+      return {
+        success: false,
+        message: `Invalid qty or purchase_price for product: ${product.name}`,
+      };
+    }
+
     const purchaseRecord = {
       invoice_id: invoiceId.toString(),
       qty: product.qty,
       purchase_price: product.purchase_price,
       subtotal: product.subtotal,
-      date: new Date()
+      date: new Date(),
     };
+
+    const existingItem = await inventoryCollection.findOne({
+      product_id: productObjectId,
+    });
 
     if (existingItem) {
       const oldQty = existingItem.total_stock_qty || 0;
       const oldAvg = existingItem.average_purchase_price || product.purchase_price;
-      const newAvg = (oldAvg * oldQty + product.purchase_price * product.qty) / (oldQty + product.qty);
+
+      const newAvg =
+        (oldAvg * oldQty + product.purchase_price * product.qty) /
+        (oldQty + product.qty);
 
       await inventoryCollection.updateOne(
-        { product_id: new ObjectId(product.product_id) },
+        { product_id: productObjectId },
         {
           $inc: { total_stock_qty: product.qty },
-          $set: { last_purchase_price: product.purchase_price, average_purchase_price: newAvg, last_updated: new Date() },
-          $push: { purchase_history: purchaseRecord }
+          $set: {
+            last_purchase_price: product.purchase_price,
+            average_purchase_price: newAvg,
+            last_updated: new Date(),
+          },
+          $push: { purchase_history: purchaseRecord },
         }
       );
+
       return { success: true, message: `Inventory updated for ${product.name}` };
     } else {
       await inventoryCollection.insertOne({
-        product_id: new ObjectId(product.product_id),
+        product_id: productObjectId,
         item_name: product.name,
         total_stock_qty: product.qty,
         sale_price: null,
@@ -394,14 +435,41 @@ async function addToInventory(product, invoiceId) {
         reorder_level: 0,
         last_updated: new Date(),
         purchase_history: [purchaseRecord],
-        sale_history: []
+        sale_history: [],
       });
+
       return { success: true, message: `New inventory item added: ${product.name}` };
     }
   } catch (error) {
-    return { success: false, message: `Failed to update inventory for ${product?.name || "unknown item"}: ${error.message}` };
+    return {
+      success: false,
+      message: `Failed to update inventory for ${product?.name}: ${error.message}`,
+    };
   }
 }
+
+
+function extractProductId(rawId) {
+  if (!rawId) return null;
+
+  // CASE 1: Extended JSON { "$oid": "id" }
+  if (typeof rawId === "object" && rawId.$oid) {
+    return rawId.$oid;
+  }
+
+  // CASE 2: Plain string
+  if (typeof rawId === "string") {
+    return rawId;
+  }
+
+  // CASE 3: ObjectId instance
+  if (rawId instanceof ObjectId) {
+    return rawId.toString();
+  }
+
+  return null;
+}
+
 
 async function deductFromInventory(product, memoId) {
   try {
