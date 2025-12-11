@@ -236,7 +236,7 @@ module.exports.getBatchSales = async (req, res) => {
 };
 
 
-// GET SINGLE BATCH BY ID
+// GET SINGLE BATCH BY Customer ID
 // ---------------------------------------------
 module.exports.getBatchById = async (req, res) => {
     try {
@@ -264,7 +264,32 @@ module.exports.getBatchById = async (req, res) => {
     }
 };
 
+// GET SINGLE BATCH BY ID
+// ---------------------------------------------
+module.exports.getBatchByCustomerId = async (req, res) => {
+    try {
+        const { customerId } = req.params;
+        const batches = await batchColl.find({ farmerId: (customerId) }).toArray();
+        console.log(customerId, batches)
 
+        if (!batches.length) {
+            return res.status(404).json({ message: "Batch not found" });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: "Batch fetched successfully",
+            batches,
+        });
+
+    } catch (error) {
+        console.error("Get Batch Error:", error);
+        res.status(500).json({
+            message: "Server error fetching batch",
+            error: error.message,
+        });
+    }
+};
 
 // DELETE BATCH
 // ---------------------------------------------
