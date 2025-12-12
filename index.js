@@ -112,8 +112,11 @@ app.use("/api/transactions", transactionRoutes);
 const inventoryRoutes = require("./routes/inventoryRoutes");
 app.use("/api/inventory", inventoryRoutes);
 
-const cashRoutes = require("./routes/cashRoutes");
-app.use("/api/cash", cashRoutes);
+// const cashRoutes = require("./routes/cashRoutes");
+// app.use("/api/cash", cashRoutes);
 
 const batchRoutes = require("./routes/farmingBatchRoutes");
 app.use("/api/batches", batchRoutes);
+
+const paymentAccountRoutes = require("./routes/paymentAccountRoutes");
+app.use("/api/payment_accounts", paymentAccountRoutes);

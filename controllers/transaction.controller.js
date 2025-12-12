@@ -2,23 +2,41 @@ const { db } = require("../db");
 const { ObjectId } = require("mongodb");
 
 const transactionsCollection = db.collection("transactions");
-const cashCollection = db.collection("cash");
+const accountsCollection = db.collection("payment_accounts");
 
 // CREATE transaction
 exports.createTransaction = async (req, res) => {
   try {
     const transaction = req.body;
 
+    if (!transaction.account_id) {
+      return res.status(400).json({
+        success: false,
+        message: "account_id is required"
+      });
+    }
+
     // Auto-add date and time if not provided
     const now = new Date();
     transaction.date = transaction.date ? new Date(transaction.date) : now;
     transaction.time = transaction.time || now.toTimeString().split(" ")[0];
 
-    // Get current cash balance
-    const cashAccount = await cashCollection.findOne({}); // assuming single account
-    const lastBalance = cashAccount?.current_balance || 0;
+    // Get the account balance
+    const account = await accountsCollection.findOne({
+      _id: new ObjectId(transaction.account_id)
+    });
 
+    if (!account) {
+      return res.status(404).json({
+        success: false,
+        message: "Account not found"
+      });
+    }
+
+    const lastBalance = account.balance || 0;
     const amount = transaction.amount || 0;
+console.log(transaction);
+    // Preserve your existing logic
     if (transaction.transaction_type === "credit") {
       transaction.balance_after_transaction = lastBalance + amount;
     } else if (transaction.transaction_type === "debit") {
@@ -30,13 +48,12 @@ exports.createTransaction = async (req, res) => {
     }
 
     // Insert transaction
-    const result = await transactionsCollection.insertOne(transaction);
+    await transactionsCollection.insertOne(transaction);
 
-    // Update cash balance
-    await cashCollection.updateOne(
-      {},
-      { $set: { current_balance: transaction.balance_after_transaction } },
-      { upsert: true }
+    // Update account balance (was cashCollection before)
+    await accountsCollection.updateOne(
+      { _id: new ObjectId(transaction.account_id) },
+      { $set: { balance: transaction.balance_after_transaction } }
     );
 
     res.status(201).json({ success: true, data: transaction });
@@ -45,27 +62,31 @@ exports.createTransaction = async (req, res) => {
   }
 };
 
-// GET all transactions (sorted by date & time descending)
+// GET all transactions
 exports.getTransactions = async (req, res) => {
   try {
     const transactions = await transactionsCollection
       .find()
       .sort({ date: -1, time: -1 })
       .toArray();
+
     res.status(200).json({ success: true, data: transactions });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// GET single transaction by _id
+// GET single transaction
 exports.getTransactionById = async (req, res) => {
   try {
     const transaction = await transactionsCollection.findOne({
       _id: new ObjectId(req.params.id),
     });
+
     if (!transaction)
-      return res.status(404).json({ success: false, message: "Transaction not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Transaction not found" });
 
     res.status(200).json({ success: true, data: transaction });
   } catch (error) {
@@ -73,209 +94,106 @@ exports.getTransactionById = async (req, res) => {
   }
 };
 
-// Function to re-calculate and update the balance for all subsequent transactions
-const reProcessBalances = async () => {
-    // 1. Get ALL transactions, sorted chronologically
-    const allTransactions = await transactionsCollection
-        .find()
-        .sort({ date: 1, time: 1 }) // Sort ascending: oldest first
-        .toArray();
+// REPROCESS balances (per account)
+const reProcessBalances = async (account_id) => {
+  // 1. Get all transactions for this account only
+  const allTransactions = await transactionsCollection
+    .find({ account_id })
+    .sort({ date: 1, time: 1 })
+    .toArray();
 
-    let runningBalance = 0;
+  let runningBalance = 0;
 
-    // 2. Iterate and update
-    for (const transaction of allTransactions) {
-        const amount = transaction.amount || 0;
-        
-        // Calculate new balance
-        if (transaction.transaction_type === "credit") {
-            runningBalance += amount;
-        } else if (transaction.transaction_type === "debit") {
-            runningBalance -= amount;
-        }
+  // 2. Iterate and update
+  for (const transaction of allTransactions) {
+    const amount = transaction.amount || 0;
 
-        // Rounding for safe monetary representation (optional, but recommended)
-        runningBalance = Math.round(runningBalance * 100) / 100;
-        
-        // Update the transaction's balance_after_transaction field
-        await transactionsCollection.updateOne(
-            { _id: transaction._id },
-            { $set: { balance_after_transaction: runningBalance } }
-        );
+    if (transaction.transaction_type === "credit") {
+      runningBalance += amount;
+    } else if (transaction.transaction_type === "debit") {
+      runningBalance -= amount;
     }
-    
-    // 3. Update the final cash balance
-    await cashCollection.updateOne(
-        {},
-        { $set: { current_balance: runningBalance } },
-        { upsert: true }
+
+    runningBalance = Math.round(runningBalance * 100) / 100;
+
+    await transactionsCollection.updateOne(
+      { _id: transaction._id },
+      { $set: { balance_after_transaction: runningBalance } }
     );
-    
-    return runningBalance;
+  }
+
+  // 3. Update the account balance
+  await accountsCollection.updateOne(
+    { _id: new ObjectId(account_id) },
+    { $set: { balance: runningBalance } }
+  );
+
+  return runningBalance;
 };
 
-
-// UPDATE transaction (FIXED LOGIC)
+// UPDATE transaction
 exports.updateTransaction = async (req, res) => {
-    try {
-        const transactionId = req.params.id;
-        const updateData = req.body;
-        
-        // 1. Update the specific transaction document with new data (e.g., particulars, amount)
-        const result = await transactionsCollection.updateOne(
-            { _id: new ObjectId(transactionId) },
-            { $set: updateData }
-        );
+  try {
+    const transactionId = req.params.id;
 
-        if (result.matchedCount === 0) {
-            return res.status(404).json({ success: false, message: "Transaction not found" });
-        }
-        
-        // 2. Re-calculate and update the balances for the entire ledger
-        const finalBalance = await reProcessBalances();
+    // Update the transaction (same logic as you wrote)
+    const result = await transactionsCollection.updateOne(
+      { _id: new ObjectId(transactionId) },
+      { $set: req.body }
+    );
 
-        res.status(200).json({ 
-            success: true, 
-            message: "Transaction updated and ledger re-balanced successfully.",
-            new_cash_balance: finalBalance
-        });
-    } catch (error) {
-        // Since re-processing is critical, any error here must be reported
-        console.error("Error during transaction update and re-balancing:", error);
-        res.status(500).json({ success: false, message: error.message });
+    if (result.matchedCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Transaction not found" });
     }
+
+    // Get the updated transaction to know account_id
+    const updatedTxn = await transactionsCollection.findOne({
+      _id: new ObjectId(transactionId),
+    });
+
+    // Rebalance only for that account
+    const finalBalance = await reProcessBalances(updatedTxn.account_id);
+
+    res.status(200).json({
+      success: true,
+      message: "Transaction updated and ledger re-balanced successfully.",
+      new_balance: finalBalance,
+    });
+  } catch (error) {
+    console.error("Error during transaction update:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
 };
 
 // DELETE transaction
 exports.deleteTransaction = async (req, res) => {
   try {
-    const result = await transactionsCollection.deleteOne({
+    // Fetch transaction first to know account_id
+    const txn = await transactionsCollection.findOne({
       _id: new ObjectId(req.params.id),
     });
-    if (result.deletedCount === 0)
-      return res.status(404).json({ success: false, message: "Transaction not found" });
 
-    res.status(200).json({ success: true, message: "Transaction deleted" });
+    if (!txn) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Transaction not found" });
+    }
+
+    // Delete it
+    await transactionsCollection.deleteOne({
+      _id: new ObjectId(req.params.id),
+    });
+
+    // Recalculate balance for that account
+    await reProcessBalances(txn.account_id);
+
+    res.status(200).json({
+      success: true,
+      message: "Transaction deleted and ledger rebalanced.",
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// const {db} = require("../db");
-
-//     const transactionsCollection = db.collection('transactions');
-//     const cashCollection = db.collection('cash');
-
-// // CREATE transaction
-// exports.createTransaction = async (req, res) => {
-//   try {
-//     const transaction = req.body;
-
-//     // Get current cash balance
-//     const cashAccount = await cashCollection.findOne({}); // assuming single account
-//     let lastBalance = cashAccount?.current_balance || 0;
-
-//     // Calculate new balance
-//     const amount = transaction.amount || 0;
-//     if (transaction.transaction_type === 'credit') {
-//       transaction.balance_after_transaction = lastBalance + amount;
-//     } else if (transaction.transaction_type === 'debit') {
-//       transaction.balance_after_transaction = lastBalance - amount;
-//     } else {
-//       return res.status(400).json({ success: false, message: 'Invalid transaction type' });
-//     }
-
-//     // Insert transaction
-//     await transactionsCollection.insertOne(transaction);
-
-//     // Update cash balance
-//     await cashCollection.updateOne({}, { $set: { current_balance: transaction.balance_after_transaction } }, { upsert: true });
-
-//     res.status(201).json({ success: true, data: transaction });
-//   } catch (error) {
-//     res.status(500).json({ success: false, message: error.message });
-//   }
-// };
-
-// // GET all transactions
-// exports.getTransactions = async (req, res) => {
-//   try {
-//     const transactions = await transactionsCollection
-//       .find()
-//       .sort({ date: -1, time: -1 })
-//       .toArray();
-//     res.status(200).json({ success: true, data: transactions });
-//   } catch (error) {
-//     res.status(500).json({ success: false, message: error.message });
-//   }
-// };
-
-// // GET single transaction by _id
-// exports.getTransactionById = async (req, res) => {
-//   try {
-//     const transaction = await transactionsCollection.findOne({ _id: new require('mongodb').ObjectId(req.params.id) });
-//     if (!transaction) return res.status(404).json({ success: false, message: 'Transaction not found' });
-//     res.status(200).json({ success: true, data: transaction });
-//   } catch (error) {
-//     res.status(500).json({ success: false, message: error.message });
-//   }
-// };
-
-// // UPDATE transaction
-// exports.updateTransaction = async (req, res) => {
-//   try {
-//     const result = await transactionsCollection.updateOne(
-//       { _id: new require('mongodb').ObjectId(req.params.id) },
-//       { $set: req.body }
-//     );
-//     if (result.matchedCount === 0) return res.status(404).json({ success: false, message: 'Transaction not found' });
-//     res.status(200).json({ success: true, message: 'Transaction updated' });
-//   } catch (error) {
-//     res.status(500).json({ success: false, message: error.message });
-//   }
-// };
-
-// // DELETE transaction
-// exports.deleteTransaction = async (req, res) => {
-//   try {
-//     const result = await transactionsCollection.deleteOne({ _id: new require('mongodb').ObjectId(req.params.id) });
-//     if (result.deletedCount === 0) return res.status(404).json({ success: false, message: 'Transaction not found' });
-//     res.status(200).json({ success: true, message: 'Transaction deleted' });
-//   } catch (error) {
-//     res.status(500).json({ success: false, message: error.message });
-//   }
-// };
