@@ -50,12 +50,6 @@ console.log(transaction);
     // Insert transaction
     await transactionsCollection.insertOne(transaction);
 
-    // Update account balance (was cashCollection before)
-    await accountsCollection.updateOne(
-      { _id: new ObjectId(transaction.account_id) },
-      { $set: { balance: transaction.balance_after_transaction } }
-    );
-
     res.status(201).json({ success: true, data: transaction });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

@@ -1,5 +1,5 @@
 const express = require('express');
-const { createPurchase, getPurchases, deletePurchase, getPurchaseById, updatePurchase, paySupplierDue } = require('../controllers/purchase.controllerv2');
+const { createPurchase, getPurchases, deletePurchase, getPurchaseById, updatePurchase, paySupplierDue } = require('../controllers/purchase.controller');
 
 const router = express.Router();
 
