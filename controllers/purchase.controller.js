@@ -6,6 +6,7 @@ const transactionsCol = db.collection("transactions");
 const inventoryCol = db.collection("inventory");
 const cashCol = db.collection("cash");
 const suppliersCol = db.collection("suppliers");
+const accountsCol = db.collection("payment_accounts");
 
 // -------------------- CREATE PURCHASE --------------------
 // async function createPurchase(req, res) {
@@ -43,7 +44,7 @@ const suppliersCol = db.collection("suppliers");
 //       _id: invoiceId,
 //       supplier_id: supplier_id ? new ObjectId(supplier_id) : null,
 //       products,
-//       totalAmount: total_amount,
+//       total_amount: total_amount,
 //       paid_amount,
 //       payment_due,
 //       paymentType,
@@ -321,8 +322,8 @@ async function getPurchaseById(req, res) {
 async function updatePurchase(req, res) {
   try {
     const purchaseId = new ObjectId(req.params.id);
-    const { products, totalAmount, paid_amount, paymentType, supplier_id } = req.body;
-    const payment_due = totalAmount - paid_amount;
+    const { products, total_amount, paid_amount, paymentType, supplier_id } = req.body;
+    const payment_due = total_amount - paid_amount;
 
     const existingPurchase = await purchasesCol.findOne({ _id: purchaseId });
     if (!existingPurchase) return res.status(404).json({ success: false, message: "Purchase not found" });
@@ -340,7 +341,7 @@ async function updatePurchase(req, res) {
       const result = await decreaseCash(oldPaid, "invoice", {
         invoiceId: purchaseId,
         products: existingPurchase.products,
-        paymentDetails: { paid_amount: oldPaid, supplierDue: existingPurchase.totalAmount - oldPaid, paymentType: oldPaymentType },
+        paymentDetails: { paid_amount: oldPaid, supplierDue: existingPurchase.total_amount - oldPaid, paymentType: oldPaymentType },
       });
       if (!result.success) return res.status(400).json({ success: false, message: `Failed to revert old cash: ${result.message}` });
     }
@@ -348,8 +349,8 @@ async function updatePurchase(req, res) {
     // Revert old supplier totals
     if (existingPurchase.supplier_id) {
       const supplierObjId = new ObjectId(existingPurchase.supplier_id);
-      const totalOldPurchase = existingPurchase.totalAmount || 0;
-      const totalOldDue = (existingPurchase.totalAmount || 0) - (existingPurchase.paid_amount || 0);
+      const totalOldPurchase = existingPurchase.total_amount || 0;
+      const totalOldDue = (existingPurchase.total_amount || 0) - (existingPurchase.paid_amount || 0);
 
       await suppliersCol.updateOne(
         { _id: supplierObjId },
@@ -368,7 +369,7 @@ async function updatePurchase(req, res) {
       const result = await decreaseCash(paid_amount, "invoice", {
         invoiceId: purchaseId,
         products,
-        paymentDetails: { paid_amount, supplierDue: totalAmount - paid_amount, paymentType },
+        paymentDetails: { paid_amount, supplierDue: total_amount - paid_amount, paymentType },
       });
       if (!result.success) return res.status(400).json({ success: false, message: `Failed to record cash: ${result.message}` });
     }
@@ -376,11 +377,11 @@ async function updatePurchase(req, res) {
     // Update supplier totals
     if (supplier_id) {
       const supplierObjId = new ObjectId(supplier_id);
-      const supplierDue = totalAmount - paid_amount;
+      const supplierDue = total_amount - paid_amount;
 
       await suppliersCol.updateOne(
         { _id: supplierObjId },
-        { $inc: { total_purchase: totalAmount, total_due: supplierDue }, $set: { last_purchase_date: new Date() } }
+        { $inc: { total_purchase: total_amount, total_due: supplierDue }, $set: { last_purchase_date: new Date() } }
       );
 
       // Add supplier history for updated purchase
@@ -393,7 +394,7 @@ async function updatePurchase(req, res) {
               type: "updated_purchase",
               purchase_id: purchaseId,
               products,
-              total_amount: totalAmount,
+              total_amount: total_amount,
               paid_amount: paid_amount,
               due_after_payment: payment_due,
               remarks: "Purchase updated"
@@ -406,7 +407,7 @@ async function updatePurchase(req, res) {
     // Update purchase record
     await purchasesCol.updateOne(
       { _id: purchaseId },
-      { $set: { products, totalAmount, paid_amount, paymentType, payment_due, supplier_id: supplier_id ? new ObjectId(supplier_id) : null, date: new Date() } }
+      { $set: { products, total_amount, paid_amount, paymentType, payment_due, supplier_id: supplier_id ? new ObjectId(supplier_id) : null, date: new Date() } }
     );
 
     const updatedPurchase = await purchasesCol.findOne({ _id: purchaseId });
@@ -417,75 +418,65 @@ async function updatePurchase(req, res) {
   }
 }
 
-// -------------------- PAY SUPPLIER DUE --------------------
+/* ======================
+   CONTROLLER: paySupplierDue (uses unified accounts)
+   ====================== */
 async function paySupplierDue(req, res) {
   try {
     const purchaseId = new ObjectId(req.params.id);
-    const { payAmount, paymentMethod="cash" } = req.body;
-
+    // accept either account id or paymentType (legacy)
+    const { payAmount, paymentAccountId, payment_method = null } = req.body;
+    console.log(req.body);
     if (!payAmount || payAmount <= 0) return res.status(400).json({ success: false, message: "Invalid payment amount." });
 
     const purchase = await purchasesCol.findOne({ _id: purchaseId });
     if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
-
-    const oldPaid = purchase.paid_amount || 0;
-    const oldTotal = purchase.totalAmount || 0;
+    console.log(purchase);
+    const oldPaid = Number(purchase.paid_amount || 0);
+    const oldTotal = Number(purchase.total_amount || 0);
     const oldDue = oldTotal - oldPaid;
     if (payAmount > oldDue) return res.status(400).json({ success: false, message: "Payment exceeds due amount" });
 
-    // Update cash ledger if cash payment
-    if (paymentMethod === "cash") {
-      const result = await decreaseCash(payAmount, "supplier_due_payment", {
-        purchaseId,
-        previousPaid: oldPaid,
-        payAmount,
-      });
-      if (!result.success) return res.status(400).json({ success: false, message: "Failed to record cash transaction" });
-    }
+    // Resolve account
+    const account = await resolveAccount({ accountId: paymentAccountId, paymentType: payment_method });
+    if (!account) return res.status(404).json({ success: false, message: "Payment account not found" });
+
+    // Debit account (supplier payment) => decrease account by payAmount (debit)
+    await adjustAccountByDiff({
+      account,
+      invoice_id: purchaseId,
+      entry_source: "supplier_due_payment",
+      diff: Number(payAmount),
+      particulars: `Supplier due payment for purchase ${purchaseId}`,
+      details: { previousPaid: oldPaid, payAmount }
+    });
 
     // Update supplier totals
-    if (purchase.supplier_id) {
-      const supplierObjId = new ObjectId(purchase.supplier_id);
+    if (purchase.supplierId) {
+      const supplierObjId = new ObjectId(purchase.supplierId);
       await suppliersCol.updateOne(
         { _id: supplierObjId },
         {
-          $inc: { total_due: -payAmount },
+          $inc: { total_due: -Number(payAmount) },
           $set: { last_payment_date: new Date() }
         }
       );
 
-      // Add supplier transaction history
-      await suppliersCol.updateOne(
-        { _id: supplierObjId },
-        {
-          $push: {
-            supplier_history: {
-              date: new Date(),
-              type: "due_payment",
-              purchase_id: purchaseId,
-              paid_amount: payAmount,
-              previous_due: oldDue,
-              due_after_payment: oldDue - payAmount,
-              payment_method: paymentMethod,
-              remarks: "Due partially or fully paid"
-            }
-          }
-        }
-      );
     }
 
     // Update purchase payment fields
-    const updatedPaid = oldPaid + payAmount;
+    const updatedPaid = oldPaid + Number(payAmount);
     const newDue = oldTotal - updatedPaid;
     await purchasesCol.updateOne(
       { _id: purchaseId },
-      { $set: { paid_amount: updatedPaid, payment_due: newDue, paymentType: paymentMethod, last_payment_date: new Date() } }
+      { $set: { paid_amount: updatedPaid, payment_due: newDue, paymentAccountId: paymentAccountId || null, paymentType: payment_method || null, last_payment_date: new Date() } }
     );
 
     const updatedPurchase = await purchasesCol.findOne({ _id: purchaseId });
 
     res.status(200).json({ success: true, message: "Supplier due paid successfully", data: updatedPurchase });
   } catch (err) {
+    console.error("paySupplierDue failed:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 }
@@ -504,110 +495,86 @@ async function deletePurchase(req, res) {
   }
 }
 
-// -------------------- INVENTORY HELPERS --------------------
-// async function addToInventory(product, invoiceId) {
-//   try {
-//     const pid = extractProductId(product.product_id);
-
-//     if (!pid) {
-//       return {
-//         success: false,
-//         message: `Invalid product_id for: ${product?.name}`,
-//       };
-//     }
-
-//     const productObjectId = new ObjectId(pid);
-
-//     if (!product.qty || !product.purchase_price) {
-//       return {
-//         success: false,
-//         message: `Invalid qty or purchase_price for product: ${product.name}`,
-//       };
-//     }
-
-//     const purchaseRecord = {
-//       invoice_id: invoiceId.toString(),
-//       qty: product.qty,
-//       purchase_price: product.purchase_price,
-//       subtotal: product.subtotal,
-//       date: new Date(),
-//     };
-
-//     const existingItem = await inventoryCollection.findOne({
-//       product_id: productObjectId,
-//     });
-
-//     if (existingItem) {
-//       const oldQty = existingItem.total_stock_qty || 0;
-//       const oldAvg = existingItem.average_purchase_price || product.purchase_price;
-
-//       const newAvg =
-//         (oldAvg * oldQty + product.purchase_price * product.qty) /
-//         (oldQty + product.qty);
-
-//       await inventoryCollection.updateOne(
-//         { product_id: productObjectId },
-//         {
-//           $inc: { total_stock_qty: product.qty },
-//           $set: {
-//             last_purchase_price: product.purchase_price,
-//             average_purchase_price: newAvg,
-//             last_updated: new Date(),
-//           },
-//           $push: { purchase_history: purchaseRecord },
-//         }
-//       );
-
-//       return { success: true, message: `Inventory updated for ${product.name}` };
-//     } else {
-//       await inventoryCollection.insertOne({
-//         product_id: productObjectId,
-//         item_name: product.name,
-//         total_stock_qty: product.qty,
-//         sale_price: null,
-//         last_purchase_price: product.purchase_price,
-//         average_purchase_price: product.purchase_price,
-//         reorder_level: 0,
-//         last_updated: new Date(),
-//         purchase_history: [purchaseRecord],
-//         sale_history: [],
-//       });
-
-//       return { success: true, message: `New inventory item added: ${product.name}` };
-//     }
-//   } catch (error) {
-//     return {
-//       success: false,
-//       message: `Failed to update inventory for ${product?.name}: ${error.message}`,
-//     };
-//   }
-// }
-
-
-async function addToInventory(product, invoice_id, session) {
+/* ======================
+   INVENTORY HELPERS
+   ====================== */
+async function addToInventory(product, invoiceId) {
   try {
-    await inventoryCol.updateOne(
-      { product_id: extractProductId(product.product_id) },
-      {
-        $inc: { stock: product.qty },
-        $push: {
-          history: {
-            invoice_id,
-            qty: product.qty,
-            type: "purchase",
-            date: new Date(),
-          },
-        },
-      },
-      { upsert: true, session }
-    );
+    const pid = extractProductId(product.product_id);
 
-    return { success: true };
-  } catch (err) {
-    return { success: false, message: err.message };
+    if (!pid) {
+      return {
+        success: false,
+        message: `Invalid product_id for: ${product?.name}`,
+      };
+    }
+
+    const productObjectId = new ObjectId(pid);
+
+    if (!product.qty || !product.purchase_price) {
+      return {
+        success: false,
+        message: `Invalid qty or purchase_price for product: ${product.name}`,
+      };
+    }
+
+    const purchaseRecord = {
+      invoice_id: invoiceId.toString(),
+      qty: product.qty,
+      purchase_price: product.purchase_price,
+      subtotal: product.subtotal,
+      date: new Date(),
+    };
+
+    const existingItem = await inventoryCol.findOne({
+      product_id: productObjectId,
+    });
+
+    if (existingItem) {
+      const oldQty = existingItem.total_stock_qty || 0;
+      const oldAvg = existingItem.average_purchase_price ?? product.purchase_price;
+
+      const newAvg =
+        (oldAvg * oldQty + product.purchase_price * product.qty) /
+        (oldQty + product.qty);
+
+      await inventoryCol.updateOne(
+        { product_id: productObjectId },
+        {
+          $inc: { total_stock_qty: product.qty },
+          $set: {
+            last_purchase_price: product.purchase_price,
+            average_purchase_price: newAvg,
+            last_updated: new Date(),
+          },
+          $push: { purchase_history: purchaseRecord },
+        }
+      );
+
+      return { success: true, message: `Inventory updated for ${product.name}` };
+    } else {
+      await inventoryCol.insertOne({
+        product_id: productObjectId,
+        item_name: product.name,
+        total_stock_qty: product.qty,
+        sale_price: null,
+        last_purchase_price: product.purchase_price,
+        average_purchase_price: product.purchase_price,
+        reorder_level: 0,
+        last_updated: new Date(),
+        purchase_history: [purchaseRecord],
+        sale_history: [],
+      });
+
+      return { success: true, message: `New inventory item added: ${product.name}` };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      message: `Failed to update inventory for ${product?.name}: ${error.message}`,
+    };
   }
 }
-
 
 function extractProductId(rawId) {
   if (!rawId) return null;
@@ -630,10 +597,9 @@ function extractProductId(rawId) {
   return null;
 }
 
-
 async function deductFromInventory(product, memoId) {
   try {
-    const productId = product.product_id || product._id;
+    const productId = extractProductId(product.product_id) || product._id;
     if (!productId || !product.qty) return { success: false, message: `Invalid product data (${product?.name || "Unknown"})` };
 
     const existingItem = await inventoryCol.findOne({ product_id: new ObjectId(productId) });
@@ -712,6 +678,33 @@ async function decreaseCash(amount, entrySource, details = {}) {
   } catch (err) {
     return { success: false, message: err.message };
   }
+}
+
+
+/**
+ * Helper: resolve an account by provided accountId or legacy paymentType string.
+ * - If accountId provided, returns that account
+ * - Else if paymentType provided (cash|bank|bkash|nagad|rocket...), will attempt to return a single matching account
+ *   (legacy compatibility). It will prefer type match (cash/bank/mobile) and, for mobile, method match.
+ */
+async function resolveAccount({ accountId, paymentType }) {
+  console.log(accountId, paymentType);
+  if (accountId) {
+    const acc = await accountsCol.findOne({ _id: new ObjectId(accountId) });
+    return acc || null;
+  }
+
+  if (!paymentType) return null;
+
+  const pt = paymentType.toLowerCase();
+  if (pt === "cash") {
+    return await accountsCol.findOne({ type: "cash" });
+  }
+  if (pt === "bank") {
+    return await accountsCol.findOne({ type: "bank" });
+  }
+  // mobile wallets: bkash, nagad, rocket, etc.
+  return await accountsCol.findOne({ type: "mobile", method: pt });
 }
 
 module.exports = {
