@@ -10,7 +10,7 @@ export async function updateAccountBalance({
   details = {}
 }) {
   const session = client.startSession();
-
+console.log('from update account balance,', amount, transactionType, entrySource, accountId, details);
   try {
     await session.startTransaction();
 

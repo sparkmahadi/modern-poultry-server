@@ -131,6 +131,8 @@ async function updatePurchase(req, res) {
   try {
     const purchaseId = new ObjectId(req.params.id);
     const { products, total_amount, paid_amount = 0, payment_method, account_id, supplier_id } = req.body;
+
+    console.log('update purchase controller', req.body);
     const payment_due = total_amount - paid_amount;
 
     const existingPurchase = await purchasesCol.findOne({ _id: purchaseId });
@@ -199,7 +201,7 @@ async function updatePurchase(req, res) {
         amount: paid_amount,
         transactionType: "debit",
         entrySource: "purchase_update",
-        accountId,
+        accountId: account_id,
         details: { invoiceId: purchaseId, remarks: "New purchase payment" }
       });
       if (!paymentResult.success) throw new Error(`Payment update failed: ${paymentResult.message}`);
