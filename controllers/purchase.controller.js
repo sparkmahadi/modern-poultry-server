@@ -9,6 +9,7 @@ const suppliersCol = db.collection("suppliers");
 
 // -------------------- GET PURCHASES --------------------
 async function getPurchases(req, res) {
+  console.log('hit getPurchases');
   const query = req.query.type;
   try {
     const filter = query ? { payment_due: { $gt: 0 } } : {};
@@ -77,6 +78,7 @@ async function createPurchase(req, res) {
     // Update inventory
     for (const product of products) {
       const result = await addToInventory(product, invoice_id, session);
+      console.log('inventory result', result);
       if (!result.success) throw new Error(result.message);
     }
 
@@ -122,151 +124,260 @@ async function createPurchase(req, res) {
 }
 
 
-
-
-// -------------------- UPDATE PURCHASE --------------------
+/**
+ * UPDATE PURCHASE
+ * ----------------
+ * This controller:
+ * 1. Detects changes between old & new purchase data
+ * 2. Updates inventory only by the quantity difference
+ * 3. Reverts old payment and applies new payment safely
+ * 4. Supports payment method / account change
+ * 5. Runs everything inside a MongoDB transaction
+ */
 async function updatePurchase(req, res) {
   const session = client.startSession();
 
   try {
     const purchaseId = new ObjectId(req.params.id);
-    const { products, total_amount, paid_amount = 0, payment_method, account_id, supplier_id } = req.body;
+    const payload = req.body;
 
-    console.log('update purchase controller', req.body);
-    const payment_due = total_amount - paid_amount;
-
-    const existingPurchase = await purchasesCol.findOne({ _id: purchaseId });
-    if (!existingPurchase) return res.status(404).json({ success: false, message: "Purchase not found" });
+    console.log("➡️ Update purchase called:", purchaseId.toString());
+    console.log("📦 Incoming payload products:", payload.products);
 
     await session.startTransaction();
+    console.log("✅ Transaction started");
 
-    // 1️⃣ Revert old inventory
-    for (const item of existingPurchase.products || []) {
-      const result = await deductFromInventory(item, purchaseId, session);
-      if (!result.success) throw new Error(`Revert inventory failed: ${result.message}`);
+    /* --------------------------------------------------
+       1️⃣ FETCH EXISTING PURCHASE
+    -------------------------------------------------- */
+    const existingPurchase = await purchasesCol.findOne(
+      { _id: purchaseId },
+      { session }
+    );
+
+    console.log("📄 Existing purchase:", existingPurchase);
+
+    if (!existingPurchase) {
+      console.log("❌ Purchase not found");
+      return res.status(404).json({ success: false, message: "Purchase not found" });
     }
 
-    // 2️⃣ Revert old payment
-    if (existingPurchase.paid_amount > 0 && existingPurchase.account_id) {
-      const revertResult = await updateAccountBalance({
-        client,
-        db,
-        amount: existingPurchase.paid_amount,
-        transactionType: "credit",
-        entrySource: "purchase_update_revert",
-        accountId: existingPurchase.account_id,
-        details: { invoiceId: purchaseId, remarks: "Revert old purchase payment" }
-      });
-      if (!revertResult.success) throw new Error(`Revert payment failed: ${revertResult.message}`);
-    }
+    /* --------------------------------------------------
+       2️⃣ INVENTORY ADJUSTMENT (DEBUG)
+    -------------------------------------------------- */
 
-    // 3️⃣ Revert old supplier balances
-    if (existingPurchase.supplier_id) {
-      const oldSupplierId = new ObjectId(existingPurchase.supplier_id);
-      const oldDue = existingPurchase.total_amount - existingPurchase.paid_amount;
-      const oldAdvance = existingPurchase.paid_amount > existingPurchase.total_amount ? existingPurchase.paid_amount - existingPurchase.total_amount : 0;
+    const oldMap = new Map();
+    existingPurchase.products.forEach(p => {
+      console.log("🟡 Old product:", p.product_id, "qty:", p.qty);
+      oldMap.set(p.product_id.toString(), p);
+    });
 
-      await suppliersCol.updateOne(
-        { _id: oldSupplierId },
-        {
-          $inc: { due: -oldDue, advance: -oldAdvance, total_due: -Math.max(oldDue, 0) },
-          $push: {
-            supplier_history: {
-              date: new Date(),
-              type: "update_revert",
-              purchase_id: purchaseId,
-              products: existingPurchase.products,
-              total_amount: existingPurchase.total_amount,
-              paid_amount: existingPurchase.paid_amount,
-              due_after_payment: oldDue,
-              remarks: "Purchase reverted before update"
-            }
-          }
-        },
+    const newMap = new Map();
+    payload.products.forEach(p => {
+      console.log("🟢 New product:", p.product_id, "qty:", p.qty);
+      newMap.set(p.product_id.toString(), p);
+    });
+
+    console.log("🧠 Old product keys:", [...oldMap.keys()]);
+    console.log("🧠 New product keys:", [...newMap.keys()]);
+
+    /* -------------------------------
+       Added or updated products
+    -------------------------------- */
+    for (const [productId, newProd] of newMap) {
+      const oldProd = oldMap.get(productId);
+
+      console.log("🔁 Processing product:", productId);
+      console.log("   Old product:", oldProd);
+      console.log("   New product:", newProd);
+
+      // Check inventory document existence
+      const invDoc = await inventoryCol.findOne(
+        { product_id: new ObjectId(productId) },
         { session }
       );
+
+      console.log("📦 Inventory doc found:", invDoc);
+
+      if (!oldProd) {
+        console.log("➕ New product detected, qty:", newProd.qty);
+
+        const result = await inventoryCol.updateOne(
+          { product_id: new ObjectId(productId) },
+          { $inc: { stock_qty: newProd.qty } },
+          { session }
+        );
+
+        console.log("📊 Inventory update result (NEW):", result);
+      } else {
+        const diff = newProd.qty - oldProd.qty;
+        console.log("📐 Quantity diff:", diff);
+
+        if (diff !== 0) {
+          const result = await inventoryCol.updateOne(
+            { product_id: new ObjectId(productId) },
+            { $inc: { stock_qty: diff } },
+            { session }
+          );
+
+          console.log("📊 Inventory update result (DIFF):", result);
+        } else {
+          console.log("⚠️ Quantity unchanged, skipping inventory update");
+        }
+      }
     }
 
-    // 4️⃣ Add new inventory
-    for (const product of products || []) {
-      const result = await addToInventory(product, purchaseId, session);
-      if (!result.success) throw new Error(`Add inventory failed: ${result.message}`);
+    /* -------------------------------
+       Removed products
+    -------------------------------- */
+    for (const [productId, oldProd] of oldMap) {
+      if (!newMap.has(productId)) {
+        console.log("➖ Product removed:", productId, "qty:", oldProd.qty);
+
+        const result = await inventoryCol.updateOne(
+          { product_id: new ObjectId(productId) },
+          { $inc: { stock_qty: -oldProd.qty } },
+          { session }
+        );
+
+        console.log("📊 Inventory update result (REMOVED):", result);
+      }
     }
 
-    // 5️⃣ Handle new payment
-    if (paid_amount > 0 && account_id) {
-      const paymentResult = await updateAccountBalance({
+    /* --------------------------------------------------
+       3️⃣ ACCOUNT BALANCE ADJUSTMENT
+    -------------------------------------------------- */
+    const oldPaid = existingPurchase.paid_amount || 0;
+    const newPaid = payload.paid_amount || 0;
+
+    console.log("💰 Old paid:", oldPaid);
+    console.log("💰 New paid:", newPaid);
+
+    if (oldPaid > 0 && existingPurchase.account_id) {
+      console.log("🔄 Reverting old payment");
+
+      await updateAccountBalance({
         client,
         db,
-        amount: paid_amount,
+        amount: oldPaid,
+        transactionType: "credit",
+        entrySource: "purchase_update",
+        accountId: existingPurchase.account_id.toString(),
+        details: existingPurchase
+      });
+    }
+
+    if (newPaid > 0 && payload.account_id) {
+      console.log("💸 Applying new payment");
+
+      await updateAccountBalance({
+        client,
+        db,
+        amount: newPaid,
         transactionType: "debit",
         entrySource: "purchase_update",
-        accountId: account_id,
-        details: { invoiceId: purchaseId, remarks: "New purchase payment" }
+        accountId: payload.account_id,
+        details: payload
       });
-      if (!paymentResult.success) throw new Error(`Payment update failed: ${paymentResult.message}`);
     }
 
-    // 6️⃣ Update new supplier balances
-    if (supplier_id) {
-      const supplierObjId = new ObjectId(supplier_id);
-      const balanceDiff = total_amount - paid_amount;
-      const advanceDiff = paid_amount > total_amount ? paid_amount - total_amount : 0;
-      const dueDiff = balanceDiff > 0 ? balanceDiff : 0;
+    /* --------------------------------------------------
+       4️⃣ SUPPLIER DUE ADJUSTMENT
+    -------------------------------------------------- */
+    const suppliersCol = db.collection("suppliers");
 
-      await suppliersCol.updateOne(
-        { _id: supplierObjId },
-        {
-          $inc: { due: dueDiff, advance: advanceDiff, total_due: dueDiff, total_purchase: total_amount },
-          $set: { last_purchase_date: new Date() },
-          $push: {
-            supplier_history: {
-              date: new Date(),
-              type: "updated_purchase",
-              purchase_id: purchaseId,
-              products,
-              total_amount,
-              paid_amount,
-              due_after_payment: balanceDiff,
-              remarks: "Purchase updated"
-            }
-          }
-        },
-        { session }
-      );
-    }
+    const oldTotal = existingPurchase.total_amount;
+    const newTotal = payload.total_amount;
 
-    // 7️⃣ Update purchase record
-    await purchasesCol.updateOne(
-      { _id: purchaseId },
+    const oldDue = oldTotal - oldPaid;
+    const newDue = newTotal - newPaid;
+
+    const dueDiff = newDue - oldDue;
+    const purchaseDiff = newTotal - oldTotal;
+
+    console.log("🏭 Supplier due diff:", dueDiff);
+    console.log("🏭 Supplier purchase diff:", purchaseDiff);
+
+    await suppliersCol.updateOne(
+      { _id: new ObjectId(payload.supplier_id) },
       {
+        $inc: {
+          due: dueDiff,
+          total_due: dueDiff,
+          total_purchase: purchaseDiff
+        },
         $set: {
-          products,
-          total_amount,
-          paid_amount,
-          payment_method,
-          account_id: paid_amount > 0 ? new ObjectId(account_id) : null,
-          payment_due,
-          supplier_id: supplier_id ? new ObjectId(supplier_id) : null,
-          date: new Date()
+          last_purchase_date: new Date(),
+          updatedAt: new Date()
         }
       },
       { session }
     );
 
-    const updatedPurchase = await purchasesCol.findOne({ _id: purchaseId });
+    /* --------------------------------------------------
+       5️⃣ UPDATE SUPPLIER HISTORY ENTRY
+    -------------------------------------------------- */
+    console.log("📝 Updating supplier history");
+
+    await suppliersCol.updateOne(
+      {
+        _id: new ObjectId(payload.supplier_id),
+        "supplier_history.purchase_id": purchaseId
+      },
+      {
+        $set: {
+          "supplier_history.$.products": payload.products,
+          "supplier_history.$.total_amount": newTotal,
+          "supplier_history.$.paid_amount": newPaid,
+          "supplier_history.$.due_after_payment": newDue,
+          "supplier_history.$.date": new Date(),
+          "supplier_history.$.remarks": "Purchase updated"
+        }
+      },
+      { session }
+    );
+
+    /* --------------------------------------------------
+       6️⃣ UPDATE PURCHASE DOCUMENT
+    -------------------------------------------------- */
+    console.log("📄 Updating purchase document");
+
+    await purchasesCol.updateOne(
+      { _id: purchaseId },
+      {
+        $set: {
+          products: payload.products,
+          total_amount: newTotal,
+          paid_amount: newPaid,
+          payment_due: newDue,
+          payment_method: payload.payment_method,
+          account_id: payload.account_id ? new ObjectId(payload.account_id) : null,
+          last_payment_date: new Date(),
+          updated_at: new Date()
+        }
+      },
+      { session }
+    );
 
     await session.commitTransaction();
-    return res.status(200).json({ success: true, message: "Purchase updated successfully", data: updatedPurchase });
+    console.log("✅ Transaction committed");
 
-  } catch (err) {
+    res.status(200).json({
+      success: true,
+      message: "Purchase updated successfully"
+    });
+
+  } catch (error) {
     await session.abortTransaction();
-    console.error("Update purchase failed:", err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    console.error("❌ Purchase update failed:", error);
+    res.status(500).json({ success: false, message: error.message });
   } finally {
-    await session.endSession();
+    session.endSession();
+    console.log("🧹 Session ended");
   }
 }
+
+
 
 
 /* ======================
@@ -457,7 +568,7 @@ async function addToInventory(product, invoiceId) {
     });
 
     if (existingItem) {
-      const oldQty = existingItem.total_stock_qty || 0;
+      const oldQty = existingItem.stock_qty || 0;
       const oldAvg = existingItem.average_purchase_price ?? product.purchase_price;
 
       const newAvg =
@@ -467,7 +578,7 @@ async function addToInventory(product, invoiceId) {
       await inventoryCol.updateOne(
         { product_id: productObjectId },
         {
-          $inc: { total_stock_qty: product.qty },
+          $inc: { stock_qty: product.qty },
           $set: {
             last_purchase_price: product.purchase_price,
             average_purchase_price: newAvg,
@@ -482,7 +593,7 @@ async function addToInventory(product, invoiceId) {
       await inventoryCol.insertOne({
         product_id: productObjectId,
         item_name: product.name,
-        total_stock_qty: product.qty,
+        stock_qty: product.qty,
         sale_price: null,
         last_purchase_price: product.purchase_price,
         average_purchase_price: product.purchase_price,
@@ -541,7 +652,7 @@ async function deductFromInventory(product, memoId) {
 
     const result = await inventoryCol.updateOne(
       { product_id: new ObjectId(productId) },
-      { $inc: { total_stock_qty: -product.qty }, $set: { last_updated: new Date() }, $push: { sale_history: saleRecord } }
+      { $inc: { stock_qty: -product.qty }, $set: { last_updated: new Date() }, $push: { sale_history: saleRecord } }
     );
 
     if (result.modifiedCount > 0) return { success: true, message: `Inventory updated for ${product.name}` };

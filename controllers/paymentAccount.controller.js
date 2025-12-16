@@ -29,6 +29,8 @@ exports.createAccount = async (req, res) => {
       is_default = false,
     } = req.body;
 
+    console.log('hit create account ', req.body);
+
     if (!type) throw new Error("Account type is required");
 
     const doc = {
@@ -90,6 +92,7 @@ exports.createAccount = async (req, res) => {
 
   } catch (err) {
     await session.abortTransaction();
+    console.log(err.message);
     res.status(400).json({ success: false, message: err.message });
   } finally {
     session.endSession();

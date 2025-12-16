@@ -20,7 +20,7 @@ router.post('/', authorizeAdmin, userController.createUser);
 // PUT update user by ID
 router.put('/:id', authorizeAdmin, userController.updateUser);
 
-// DELETE user by ID
+// DELETE user by IDs
 router.delete('/:id', authorizeAdmin, userController.deleteUser);
 
 module.exports = router;
