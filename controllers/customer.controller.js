@@ -4,7 +4,7 @@ const { db } = require("../db");
 // Create a new customer
 exports.createCustomer = async (req, res) => {
   console.log('hit create customer');
-  const { name, address, phone, type, due, advance, status } = req.body;
+  const { name, address, phone, type, manual_due, manual_advance, due, advance, status } = req.body;
   console.log(req.body)
 
   if (!name || !type) {
@@ -17,6 +17,8 @@ exports.createCustomer = async (req, res) => {
       address: address || "",
       phone: phone || "",
       type,
+      manual_due: manual_due || 0,
+      manual_advance: manual_advance || 0,
       due: due || 0,
       advance: advance || 0,
       status: status || "active",
@@ -44,9 +46,9 @@ exports.getCustomers = async (req, res) => {
 // Get all customers
 exports.getCustomerById = async (req, res) => {
   const id = req.params.id;
-  // console.log(id);
   try {
     const customer = await db.collection("customers").findOne({ _id: new ObjectId(id) });
+    console.log("getCustomerById",id, 'found', customer);
     res.status(200).json({ success: true, data: customer });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

@@ -96,41 +96,29 @@ exports.getStockByProductId = async (req, res) => {
   try {
     const { productId } = req.params;
     console.log("getStockByProductId", productId);
-
+    
     if (!productId) {
       return res.status(400).json({
         success: false,
         message: "Product ID is required",
       });
     }
-
+    
     // Aggregate all inventory docs with same product_id and sum the total_stock_qty
-    const result = await inventoryCol
-      .aggregate([
-        {
-          $match: { product_id: new ObjectId(productId) },
-        },
-        {
-          $group: {
-            _id: "$product_id",
-            totalStock: { $sum: { $ifNull: ["$total_stock_qty", 0] } },
-          },
-        },
-      ])
-      .toArray();
-
+    const result = await inventoryCol.findOne({product_id: new ObjectId(productId)});
+    
     // If product not found in inventory
-    if (!result || result.length === 0) {
+    if (!result) {
       return res.json({
         success: false,
         message: "Product not found in inventory",
         stock: 0,
       });
     }
-
+    
     // Respond with summed total stock
-    const totalStock = result[0].totalStock || 0;
-
+    const totalStock = result.stock_qty;
+    console.log('checking stock qty', totalStock);
     res.status(200).json({
       success: true,
       productId,

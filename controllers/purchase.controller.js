@@ -1,6 +1,8 @@
 const { ObjectId } = require("mongodb");
 const { client, db } = require("../db.js");
 const { updateAccountBalance } = require("../services/accountBalance.service.js");
+const { increaseInventoryStock, decreaseInventoryStock, addToInventory } = require("../services/inventory.service.js");
+const { extractProductId } = require("../utils/id.util.js");
 
 const purchasesCol = db.collection("purchases");
 const inventoryCol = db.collection("inventory");
@@ -163,86 +165,68 @@ async function updatePurchase(req, res) {
     }
 
     /* --------------------------------------------------
-       2️⃣ INVENTORY ADJUSTMENT (DEBUG)
-    -------------------------------------------------- */
+   2️⃣ INVENTORY ADJUSTMENT (USING SERVICES)
+-------------------------------------------------- */
 
-    const oldMap = new Map();
-    existingPurchase.products.forEach(p => {
-      console.log("🟡 Old product:", p.product_id, "qty:", p.qty);
-      oldMap.set(p.product_id.toString(), p);
+const oldMap = new Map();
+existingPurchase.products.forEach(p => {
+  oldMap.set(p.product_id.toString(), p);
+});
+
+const newMap = new Map();
+payload.products.forEach(p => {
+  newMap.set(p.product_id.toString(), p);
+});
+
+/* -------------------------------
+   Added or updated products
+-------------------------------- */
+for (const [productId, newProd] of newMap) {
+  const oldProd = oldMap.get(productId);
+
+  if (!oldProd) {
+    // ➕ Newly added product
+    const inc = await increaseInventoryStock({
+      product_id: productId,
+      qty: newProd.qty
     });
 
-    const newMap = new Map();
-    payload.products.forEach(p => {
-      console.log("🟢 New product:", p.product_id, "qty:", p.qty);
-      newMap.set(p.product_id.toString(), p);
+    if (!inc.success) throw new Error(inc.message);
+
+  } else {
+    const diff = newProd.qty - oldProd.qty;
+
+    if (diff > 0) {
+      const inc = await increaseInventoryStock({
+        product_id: productId,
+        qty: diff
+      });
+      if (!inc.success) throw new Error(inc.message);
+
+    } else if (diff < 0) {
+      const dec = await decreaseInventoryStock({
+        product_id: productId,
+        qty: Math.abs(diff)
+      });
+      if (!dec.success) throw new Error(dec.message);
+    }
+  }
+}
+
+/* -------------------------------
+   Removed products
+-------------------------------- */
+for (const [productId, oldProd] of oldMap) {
+  if (!newMap.has(productId)) {
+    const dec = await decreaseInventoryStock({
+      product_id: productId,
+      qty: oldProd.qty
     });
+    if (!dec.success) throw new Error(dec.message);
+  }
+}
 
-    console.log("🧠 Old product keys:", [...oldMap.keys()]);
-    console.log("🧠 New product keys:", [...newMap.keys()]);
 
-    /* -------------------------------
-       Added or updated products
-    -------------------------------- */
-    for (const [productId, newProd] of newMap) {
-      const oldProd = oldMap.get(productId);
-
-      console.log("🔁 Processing product:", productId);
-      console.log("   Old product:", oldProd);
-      console.log("   New product:", newProd);
-
-      // Check inventory document existence
-      const invDoc = await inventoryCol.findOne(
-        { product_id: new ObjectId(productId) },
-        { session }
-      );
-
-      console.log("📦 Inventory doc found:", invDoc);
-
-      if (!oldProd) {
-        console.log("➕ New product detected, qty:", newProd.qty);
-
-        const result = await inventoryCol.updateOne(
-          { product_id: new ObjectId(productId) },
-          { $inc: { stock_qty: newProd.qty } },
-          { session }
-        );
-
-        console.log("📊 Inventory update result (NEW):", result);
-      } else {
-        const diff = newProd.qty - oldProd.qty;
-        console.log("📐 Quantity diff:", diff);
-
-        if (diff !== 0) {
-          const result = await inventoryCol.updateOne(
-            { product_id: new ObjectId(productId) },
-            { $inc: { stock_qty: diff } },
-            { session }
-          );
-
-          console.log("📊 Inventory update result (DIFF):", result);
-        } else {
-          console.log("⚠️ Quantity unchanged, skipping inventory update");
-        }
-      }
-    }
-
-    /* -------------------------------
-       Removed products
-    -------------------------------- */
-    for (const [productId, oldProd] of oldMap) {
-      if (!newMap.has(productId)) {
-        console.log("➖ Product removed:", productId, "qty:", oldProd.qty);
-
-        const result = await inventoryCol.updateOne(
-          { product_id: new ObjectId(productId) },
-          { $inc: { stock_qty: -oldProd.qty } },
-          { session }
-        );
-
-        console.log("📊 Inventory update result (REMOVED):", result);
-      }
-    }
 
     /* --------------------------------------------------
        3️⃣ ACCOUNT BALANCE ADJUSTMENT
@@ -455,7 +439,6 @@ async function paySupplierDue(req, res) {
 }
 
 
-
 // -------------------- DELETE PURCHASE --------------------
 async function deletePurchase(req, res) {
   const session = client.startSession();
@@ -532,135 +515,86 @@ async function deletePurchase(req, res) {
 }
 
 
-/* ======================
-   INVENTORY HELPERS
-   ====================== */
-async function addToInventory(product, invoiceId) {
-  try {
-    const pid = extractProductId(product.product_id);
+// /* ======================
+//    INVENTORY HELPERS
+//    ====================== */
+// async function addToInventory(product, invoiceId) {
+//   try {
+//     const pid = extractProductId(product.product_id);
 
-    if (!pid) {
-      return {
-        success: false,
-        message: `Invalid product_id for: ${product?.name}`,
-      };
-    }
+//     if (!pid) {
+//       return {
+//         success: false,
+//         message: `Invalid product_id for: ${product?.name}`,
+//       };
+//     }
 
-    const productObjectId = new ObjectId(pid);
+//     const productObjectId = new ObjectId(pid);
 
-    if (!product.qty || !product.purchase_price) {
-      return {
-        success: false,
-        message: `Invalid qty or purchase_price for product: ${product.name}`,
-      };
-    }
+//     if (!product.qty || !product.purchase_price) {
+//       return {
+//         success: false,
+//         message: `Invalid qty or purchase_price for product: ${product.name}`,
+//       };
+//     }
 
-    const purchaseRecord = {
-      invoice_id: invoiceId.toString(),
-      qty: product.qty,
-      purchase_price: product.purchase_price,
-      subtotal: product.subtotal,
-      date: new Date(),
-    };
+//     const purchaseRecord = {
+//       invoice_id: invoiceId.toString(),
+//       qty: product.qty,
+//       purchase_price: product.purchase_price,
+//       subtotal: product.subtotal,
+//       date: new Date(),
+//     };
 
-    const existingItem = await inventoryCol.findOne({
-      product_id: productObjectId,
-    });
+//     const existingItem = await inventoryCol.findOne({
+//       product_id: productObjectId,
+//     });
 
-    if (existingItem) {
-      const oldQty = existingItem.stock_qty || 0;
-      const oldAvg = existingItem.average_purchase_price ?? product.purchase_price;
+//     if (existingItem) {
+//       const oldQty = existingItem.stock_qty || 0;
+//       const oldAvg = existingItem.average_purchase_price ?? product.purchase_price;
 
-      const newAvg =
-        (oldAvg * oldQty + product.purchase_price * product.qty) /
-        (oldQty + product.qty);
+//       const newAvg =
+//         (oldAvg * oldQty + product.purchase_price * product.qty) /
+//         (oldQty + product.qty);
 
-      await inventoryCol.updateOne(
-        { product_id: productObjectId },
-        {
-          $inc: { stock_qty: product.qty },
-          $set: {
-            last_purchase_price: product.purchase_price,
-            average_purchase_price: newAvg,
-            last_updated: new Date(),
-          },
-          $push: { purchase_history: purchaseRecord },
-        }
-      );
+//       await inventoryCol.updateOne(
+//         { product_id: productObjectId },
+//         {
+//           $inc: { stock_qty: product.qty },
+//           $set: {
+//             last_purchase_price: product.purchase_price,
+//             average_purchase_price: newAvg,
+//             last_updated: new Date(),
+//           },
+//           $push: { purchase_history: purchaseRecord },
+//         }
+//       );
 
-      return { success: true, message: `Inventory updated for ${product.name}` };
-    } else {
-      await inventoryCol.insertOne({
-        product_id: productObjectId,
-        item_name: product.name,
-        stock_qty: product.qty,
-        sale_price: null,
-        last_purchase_price: product.purchase_price,
-        average_purchase_price: product.purchase_price,
-        reorder_level: 0,
-        last_updated: new Date(),
-        purchase_history: [purchaseRecord],
-        sale_history: [],
-      });
+//       return { success: true, message: `Inventory updated for ${product.name}` };
+//     } else {
+//       await inventoryCol.insertOne({
+//         product_id: productObjectId,
+//         item_name: product.name,
+//         stock_qty: product.qty,
+//         sale_price: null,
+//         last_purchase_price: product.purchase_price,
+//         average_purchase_price: product.purchase_price,
+//         reorder_level: 0,
+//         last_updated: new Date(),
+//         purchase_history: [purchaseRecord],
+//         sale_history: [],
+//       });
 
-      return { success: true, message: `New inventory item added: ${product.name}` };
-    }
-  } catch (error) {
-    return {
-      success: false,
-      message: `Failed to update inventory for ${product?.name}: ${error.message}`,
-    };
-  }
-}
-
-function extractProductId(rawId) {
-  if (!rawId) return null;
-
-  // CASE 1: Extended JSON { "$oid": "id" }
-  if (typeof rawId === "object" && rawId.$oid) {
-    return rawId.$oid;
-  }
-
-  // CASE 2: Plain string
-  if (typeof rawId === "string") {
-    return rawId;
-  }
-
-  // CASE 3: ObjectId instance
-  if (rawId instanceof ObjectId) {
-    return rawId.toString();
-  }
-
-  return null;
-}
-
-async function deductFromInventory(product, memoId) {
-  try {
-    const productId = extractProductId(product.product_id) || product._id;
-    if (!productId || !product.qty) return { success: false, message: `Invalid product data (${product?.name || "Unknown"})` };
-
-    const existingItem = await inventoryCol.findOne({ product_id: new ObjectId(productId) });
-    if (!existingItem) return { success: false, message: `Product not found: ${product.name}` };
-
-    const saleRecord = {
-      memo_id: memoId.toString(),
-      qty: product.qty,
-      price: product.price || product.purchase_price || 0,
-      subtotal: product.subtotal || 0,
-      date: new Date()
-    };
-
-    const result = await inventoryCol.updateOne(
-      { product_id: new ObjectId(productId) },
-      { $inc: { stock_qty: -product.qty }, $set: { last_updated: new Date() }, $push: { sale_history: saleRecord } }
-    );
-
-    if (result.modifiedCount > 0) return { success: true, message: `Inventory updated for ${product.name}` };
-    return { success: false, message: `No update occurred for ${product.name}` };
-  } catch (err) {
-    return { success: false, message: err.message };
-  }
-}
+//       return { success: true, message: `New inventory item added: ${product.name}` };
+//     }
+//   } catch (error) {
+//     return {
+//       success: false,
+//       message: `Failed to update inventory for ${product?.name}: ${error.message}`,
+//     };
+//   }
+// }
 
 
 module.exports = {

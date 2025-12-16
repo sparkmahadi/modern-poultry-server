@@ -35,37 +35,37 @@ exports.getSupplierById = async (req, res) => {
 
 // 📦 Search suppliers
 exports.searchSuppliers = async (req, res) => {
-  try {
-    const { q } = req.query;
+    try {
+        const { q } = req.query;
 
-    if (!q || q.trim() === "") {
-      return res.status(400).json({ success: false, message: "Search query required" });
+        if (!q || q.trim() === "") {
+            return res.status(400).json({ success: false, message: "Search query required" });
+        }
+
+        const regex = new RegExp(q.trim(), "i"); // case-insensitive search
+
+        const suppliers = await suppliersCollection
+            .find({
+                $or: [
+                    { name: regex },
+                    { phone: regex },
+                    { type: regex },
+                    { address: regex },
+                ],
+            })
+            .sort({ name: 1 })
+            .toArray();
+
+        res.status(200).json({ success: true, data: suppliers });
+    } catch (error) {
+        console.error("Error searching suppliers:", error);
+        res.status(500).json({ success: false, message: "Failed to search suppliers", error: error.message });
     }
-
-    const regex = new RegExp(q.trim(), "i"); // case-insensitive search
-
-    const suppliers = await suppliersCollection
-      .find({
-        $or: [
-          { name: regex },
-          { phone: regex },
-          { type: regex },
-          { address: regex },
-        ],
-      })
-      .sort({ name: 1 })
-      .toArray();
-
-    res.status(200).json({ success: true, data: suppliers });
-  } catch (error) {
-    console.error("Error searching suppliers:", error);
-    res.status(500).json({ success: false, message: "Failed to search suppliers", error: error.message });
-  }
 };
 
 // ➕ Create a new supplier
 exports.createSupplier = async (req, res) => {
-    const { name, address, phone, type, due, advance, status } = req.body;
+    const { name, address, phone, type, manual_due, manual_advance, due, advance, status } = req.body;
 
     if (!name || !type) {
         return res.status(400).json({ success: false, message: "Supplier name and type are required." });
@@ -77,6 +77,8 @@ exports.createSupplier = async (req, res) => {
             address: address || "",
             phone: phone || "",
             type: type || "regular",
+            manual_due: Number(manual_due) || 0,
+            manual_advance: Number(manual_advance) || 0,
             due: Number(due) || 0,
             advance: Number(advance) || 0,
             status: status || "active",
@@ -95,8 +97,9 @@ exports.createSupplier = async (req, res) => {
 // ✏️ Update supplier
 exports.updateSupplier = async (req, res) => {
     const { id } = req.params;
-    const { name, address, phone, type, due, advance, status } = req.body;
-
+    const { name, address, phone, type, manual_due, manual_advance, due, advance, status } = req.body;
+    console.log('updateSupplier', req.body);
+    // return res.status(200).json({ success: true, message: "Supplier updated successfully",});
     try {
         const supplier = await suppliersCollection.findOne({ _id: new ObjectId(id) });
         if (!supplier) {
@@ -108,6 +111,8 @@ exports.updateSupplier = async (req, res) => {
             address: address ?? supplier.address,
             phone: phone ?? supplier.phone,
             type: type ?? supplier.type,
+            manual_due: Number(manual_due) || 0,
+            manual_advance: Number(manual_advance) || 0,
             due: due !== undefined ? Number(due) : supplier.due,
             advance: advance !== undefined ? Number(advance) : supplier.advance,
             status: status ?? supplier.status,
