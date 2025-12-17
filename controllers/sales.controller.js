@@ -2,6 +2,7 @@ const { ObjectId } = require("mongodb");
 const { client, db } = require("../db");
 const { updateAccountBalance } = require("../services/accountBalance.service");
 const { extractProductId } = require("../utils/id.util");
+const { addToInventory } = require("../services/inventory.service");
 
 const salesCol = db.collection("sales");
 const inventoryCol = db.collection("inventory");
@@ -22,7 +23,7 @@ async function deductFromInventory(product, memoId, session) {
     const saleRecord = {
       memo_id: memoId.toString(),
       qty: product.qty,
-      price: product.sale_price || product.purchase_price || 0,
+      price: product.sale_price || product.Sale_price || 0,
       subtotal: product.subtotal || 0,
       date: new Date()
     };
@@ -47,7 +48,7 @@ async function deductFromInventory(product, memoId, session) {
 module.exports.createSell = async (req, res) => {
   const session = client.startSession();
   try {
-    const { memoNo, date, customer_id, products, total_amount, paid_amount = 0, payment_method, account_id } = req.body;
+    const { memoNo, date, customer_id, products, total_amount, paid_amount = 0, payment_method, account_id, batch_id } = req.body;
     console.log('create sell', req.body);
     if (!products || !products.length) return res.status(400).json({ success: false, message: "Products array cannot be empty" });
     if (!customer_id) return res.status(400).json({ success: false, message: "Customer is required" });
@@ -71,6 +72,7 @@ module.exports.createSell = async (req, res) => {
       paid_amount,
       due_amount,
       payment_method,
+      batch_id,
       account_id: paid_amount > 0 ? new ObjectId(account_id) : null,
       createdAt: new Date()
     }, { session });
@@ -101,7 +103,7 @@ module.exports.createSell = async (req, res) => {
       { _id: new ObjectId(customer_id) },
       {
         $inc: { total_sales: total_amount, total_due: due_amount > 0 ? due_amount : 0, due: due_amount, advance: advance_amount },
-        $set: { last_purchase_date: sellDate },
+        $set: { last_Sale_date: sellDate },
         $push: {
           customer_history: {
             date: sellDate,
@@ -131,7 +133,6 @@ module.exports.createSell = async (req, res) => {
     await session.endSession();
   }
 };
-
 
 
 /* =====================================================
@@ -183,29 +184,6 @@ module.exports.getSaleById = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
-
-// module.exports.updateSaleById = async (req, res) => {
-//   try {
-//     const { id } = req.params;
-//     const payload = req.body;
-
-//     const result = await salesCol.updateOne(
-//       { _id: new ObjectId(id) },
-//       { $set: { ...payload, updatedAt: new Date() } }
-//     );
-
-//     if (result.matchedCount === 0) {
-//       return res.status(404).json({ success: false, message: "Sale not found" });
-//     }
-
-//     res.status(200).json({
-//       success: true,
-//       message: "Sale updated successfully"
-//     });
-//   } catch (err) {
-//     res.status(500).json({ success: false, message: err.message });
-//   }
-// };
 
 
 module.exports.updateSaleById = async (req, res) => {
@@ -380,6 +358,94 @@ module.exports.updateSaleById = async (req, res) => {
     console.log("🧹 Session ended");
   }
 };
+
+
+// -------------------- DELETE SALE --------------------
+module.exports.deleteSale = async(req, res) => {
+  const session = client.startSession();
+
+  try {
+    const saleId = new ObjectId(req.params.id);
+    
+    // Check if the sale exists before starting transaction
+    const existingSale = await salesCol.findOne({ _id: saleId });
+    if (!existingSale) {
+      return res.status(404).json({ success: false, message: "Sale not found" });
+    }
+
+    await session.startTransaction();
+
+    // 1️⃣ Revert Inventory: Add products back to stock
+    // Assuming you have a function addToInventory that does the opposite of deductFromInventory
+    for (const item of existingSale.products || []) {
+      const result = await addToInventory(item, saleId);
+      console.log(result);
+      if (!result.success) throw new Error(`Revert inventory failed: ${result.message}`);
+    }
+
+    // 2️⃣ Revert Payment: If customer paid money, refund the account balance
+    if (existingSale.paid_amount > 0 && existingSale.account_id) {
+      const revertResult = await updateAccountBalance({
+        client,
+        db,
+        amount: existingSale.paid_amount,
+        transactionType: "debit", // Reversing a 'credit' (income) requires a 'debit' (expense/outflow)
+        entrySource: "sale_delete",
+        accountId: existingSale.account_id,
+        details: { invoiceId: saleId, remarks: "Refund/Revert payment on sale deletion" }
+      });
+      if (!revertResult.success) throw new Error(`Revert payment failed: ${revertResult.message}`);
+    }
+
+    // 3️⃣ Update Customer Balances
+    if (existingSale.customer_id) {
+      const customerObjId = new ObjectId(existingSale.customer_id);
+      
+      // Calculate differences to revert
+      const balanceDiff = existingSale.total_amount - existingSale.paid_amount;
+      const dueDiff = balanceDiff > 0 ? balanceDiff : 0;
+      const advanceDiff = existingSale.paid_amount > existingSale.total_amount ? existingSale.paid_amount - existingSale.total_amount : 0;
+
+      await customersCol.updateOne(
+        { _id: customerObjId },
+        {
+          $inc: { 
+            total_sale: -existingSale.total_amount, 
+            total_due: -dueDiff, 
+            due: -dueDiff, 
+            advance: -advanceDiff 
+          },
+          $push: {
+            customer_history: {
+              date: new Date(),
+              type: "deleted_sale",
+              sale_id: saleId,
+              total_amount: existingSale.total_amount,
+              paid_amount: existingSale.paid_amount,
+              remarks: "Sale record deleted - Balances adjusted"
+            }
+          }
+        },
+        { session }
+      );
+    }
+
+    // 4️⃣ Delete the Sale Record
+    await salesCol.deleteOne({ _id: saleId }, { session });
+
+    // Commit all changes
+    await session.commitTransaction();
+    return res.status(200).json({ success: true, message: "Sale deleted and balances reverted successfully" });
+
+  } catch (err) {
+    // If anything fails, abort transaction to maintain data integrity
+    await session.abortTransaction();
+    console.error("Delete sale failed:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
+  }
+}
 
 
 

@@ -1,5 +1,5 @@
 const express = require("express");
-const { createSell, getSales, getCashSales, getDueSales, getSaleById, updateSaleById, getSalesByCustomerId, receiveCustomerDue } = require("../controllers/sales.controller");
+const { createSell, getSales, getCashSales, getDueSales, getSaleById, updateSaleById, getSalesByCustomerId, receiveCustomerDue, deleteSale } = require("../controllers/sales.controller");
 
 const router = express.Router();
 
@@ -15,5 +15,6 @@ router.patch("/receive-customer-due/:saleId", receiveCustomerDue)
 router.get("/customer-sales/:customerId", getSalesByCustomerId);
 router.get("/:id", getSaleById);
 router.put("/:id", updateSaleById);
+router.delete("/:id", deleteSale);
 
 module.exports = router;
