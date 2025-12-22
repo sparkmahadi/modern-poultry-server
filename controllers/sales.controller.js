@@ -14,7 +14,7 @@ async function deductFromInventory(product, memoId, session) {
     if (!productId || !product.qty) return { success: false, message: `Invalid product data (${product?.name || "Unknown"})` };
 
     const existingItem = await inventoryCol.findOne({ product_id: new ObjectId(productId) }, { session });
-    if (!existingItem) return { success: false, message: `Product not found in inventory: ${productId}` };
+    if (!existingItem) return { success: false, message: `Product not added in inventory: ${productId}` };
 
     if (existingItem.stock_qty < product.qty) {
       return { success: false, message: `Insufficient stock quantity`, available: existingItem.stock_qty, requested: product.qty };
