@@ -120,3 +120,10 @@ app.use("/api/batches", batchRoutes);
 
 const paymentAccountRoutes = require("./routes/paymentAccountRoutes");
 app.use("/api/payment_accounts", paymentAccountRoutes);
+
+
+const expenseThreadRoutes = require("./routes/expenseThreads.routes");
+app.use("/api/expense-threads", expenseThreadRoutes);
+
+const billsRoutes = require("./routes/bills.routes");
+app.use("/api/bills", billsRoutes);
