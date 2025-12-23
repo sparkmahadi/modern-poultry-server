@@ -1,5 +1,6 @@
 const { ObjectId } = require("mongodb");
-const { db } = require("../db.js");
+const { client, db } = require("../db.js");
+const { updateAccountBalance } = require("../services/accountBalance.service.js");
 
 const billsCol = db.collection("bills");
 const expenseThreadsCol = db.collection("expense_threads");
@@ -55,47 +56,41 @@ async function getBillById(req, res) {
   }
 }
 
-/* --------------------------------------------------
-   CREATE BILL
--------------------------------------------------- */
 async function createBill(req, res) {
+  const session = client.startSession();
+
   try {
-    const {
-      billName,
-      amount,
-      expenseThreadId,
-      payment_details,
-      remarks
-    } = req.body;
+    const { billName, amount, expenseThreadId, payment_details, remarks } = req.body;
 
     if (!billName || amount === undefined || !expenseThreadId)
-      return res.status(400).json({
-        success: false,
-        message: "Bill name, amount and expense thread are required"
-      });
+      return res.status(400).json({ success: false, message: "Required fields missing" });
 
     if (!ObjectId.isValid(expenseThreadId))
-      return res.status(400).json({
-        success: false,
-        message: "Invalid expense thread ID"
-      });
+      return res.status(400).json({ success: false, message: "Invalid expense thread ID" });
 
-    // Fetch thread snapshot
-    const thread = await expenseThreadsCol.findOne({
-      _id: new ObjectId(expenseThreadId)
-    });
+    await session.startTransaction();
+
+    /* ---------------------------------------------
+       1️⃣ FETCH THREAD (LOCKED IN TRANSACTION)
+    --------------------------------------------- */
+    const thread = await expenseThreadsCol.findOne(
+      { _id: new ObjectId(expenseThreadId) },
+      { session }
+    );
 
     if (!thread)
-      return res.status(404).json({
-        success: false,
-        message: "Expense thread not found"
-      });
+      throw new Error("Expense thread not found");
 
+    const billAmount = Number(amount);
+
+    /* ---------------------------------------------
+       2️⃣ PREPARE BILL DOCUMENT
+    --------------------------------------------- */
     const payload = {
       billName: billName.trim(),
-      amount: Number(amount),
+      amount: billAmount,
 
-      expenseThreadId: new ObjectId(expenseThreadId),
+      expenseThreadId: thread._id,
       expenseThreadName: thread.name,
 
       payment_details: {
@@ -107,76 +102,135 @@ async function createBill(req, res) {
       },
 
       remarks: remarks || "",
-
       createdAt: new Date(),
       updatedAt: new Date()
     };
 
-    const result = await billsCol.insertOne(payload);
+    /* ---------------------------------------------
+       3️⃣ INSERT BILL
+    --------------------------------------------- */
+    const billResult = await billsCol.insertOne(payload, { session });
+
+    /* ---------------------------------------------
+       4️⃣ INCREMENT THREAD TOTAL COST
+    --------------------------------------------- */
+    await expenseThreadsCol.updateOne(
+      { _id: thread._id },
+      { $inc: { total_cost: billAmount } },
+      { session }
+    );
+
+    /* ---------------------------------------------
+       5️⃣ DEBIT ACCOUNT (IF PAID)
+    --------------------------------------------- */
+    const paidAmount = payload.payment_details.paid_amount;
+
+    if (paidAmount > 0 && payload.payment_details.account_id) {
+      const paymentResult = await updateAccountBalance({
+        client,
+        db,
+        session,
+        amount: paidAmount,
+        transactionType: "debit",
+        entrySource: `expense - ${payload.billName}`,
+        bill_id: billResult.insertedId,
+        accountId: payload.payment_details.account_id
+      });
+
+      if (!paymentResult.success)
+        throw new Error(paymentResult.message);
+    }
+
+    await session.commitTransaction();
 
     return res.status(201).json({
       success: true,
       message: "Bill created successfully",
-      data: { _id: result.insertedId, ...payload }
+      data: { _id: billResult.insertedId, ...payload }
     });
+
   } catch (error) {
+    await session.abortTransaction();
     console.error("CREATE BILL ERROR:", error);
+
     return res.status(500).json({
       success: false,
-      message: "Failed to create bill"
+      message: error.message || "Failed to create bill"
     });
+  } finally {
+    await session.endSession();
   }
 }
+
 
 /* --------------------------------------------------
    UPDATE BILL
 -------------------------------------------------- */
 async function updateBill(req, res) {
+  const session = client.startSession();
+
   try {
     const { id } = req.params;
-    const {
-      billName,
-      amount,
-      expenseThreadId,
-      paymentAc,
-      payment_details,
-      remarks
-    } = req.body;
+    const { billName, amount, expenseThreadId, payment_details, remarks } = req.body;
 
     if (!ObjectId.isValid(id))
       return res.status(400).json({ success: false, message: "Invalid bill ID" });
 
-    let threadSnapshot = {};
+    await session.startTransaction();
 
-    if (expenseThreadId) {
-      if (!ObjectId.isValid(expenseThreadId))
-        return res.status(400).json({
-          success: false,
-          message: "Invalid expense thread ID"
-        });
+    /* ---------------------------------------------
+       1️⃣ FETCH EXISTING BILL
+    --------------------------------------------- */
+    const existingBill = await billsCol.findOne(
+      { _id: new ObjectId(id) },
+      { session }
+    );
 
-      const thread = await expenseThreadsCol.findOne({
-        _id: new ObjectId(expenseThreadId)
-      });
+    if (!existingBill)
+      throw new Error("Bill not found");
 
-      if (!thread)
-        return res.status(404).json({
-          success: false,
-          message: "Expense thread not found"
-        });
+    const oldAmount = Number(existingBill.amount);
+    const newAmount = amount !== undefined ? Number(amount) : oldAmount;
 
-      threadSnapshot = {
-        expenseThreadId: new ObjectId(expenseThreadId),
-        expenseThreadName: thread.name
-      };
+    const oldThreadId = existingBill.expenseThreadId;
+    const newThreadId = expenseThreadId
+      ? new ObjectId(expenseThreadId)
+      : oldThreadId;
+
+    /* ---------------------------------------------
+       2️⃣ HANDLE THREAD / AMOUNT CHANGE
+    --------------------------------------------- */
+    if (!oldThreadId.equals(newThreadId)) {
+      // Remove from old thread
+      await expenseThreadsCol.updateOne(
+        { _id: oldThreadId },
+        { $inc: { total_cost: -oldAmount } },
+        { session }
+      );
+
+      // Add to new thread
+      await expenseThreadsCol.updateOne(
+        { _id: newThreadId },
+        { $inc: { total_cost: newAmount } },
+        { session }
+      );
+    } else if (oldAmount !== newAmount) {
+      // Same thread, apply difference only
+      await expenseThreadsCol.updateOne(
+        { _id: oldThreadId },
+        { $inc: { total_cost: newAmount - oldAmount } },
+        { session }
+      );
     }
 
+    /* ---------------------------------------------
+       3️⃣ UPDATE BILL DOCUMENT
+    --------------------------------------------- */
     const updateDoc = {
       $set: {
         ...(billName && { billName: billName.trim() }),
-        ...(amount !== undefined && { amount: Number(amount) }),
-        ...(paymentAc && { paymentAc }),
-        ...(remarks !== undefined && { remarks }),
+        ...(amount !== undefined && { amount: newAmount }),
+        ...(expenseThreadId && { expenseThreadId: newThreadId }),
         ...(payment_details && {
           payment_details: {
             payment_method: payment_details.payment_method || "",
@@ -186,59 +240,102 @@ async function updateBill(req, res) {
             paid_amount: Number(payment_details.paid_amount || 0)
           }
         }),
-        ...threadSnapshot,
+        ...(remarks !== undefined && { remarks }),
         updatedAt: new Date()
       }
     };
 
-    const result = await billsCol.updateOne(
-      { _id: new ObjectId(id) },
-      updateDoc
+    await billsCol.updateOne(
+      { _id: existingBill._id },
+      updateDoc,
+      { session }
     );
 
-    if (!result.matchedCount)
-      return res.status(404).json({ success: false, message: "Bill not found" });
+    await session.commitTransaction();
 
     return res.status(200).json({
       success: true,
       message: "Bill updated successfully"
     });
+
   } catch (error) {
+    await session.abortTransaction();
     console.error("UPDATE BILL ERROR:", error);
+
     return res.status(500).json({
       success: false,
-      message: "Failed to update bill"
+      message: error.message || "Failed to update bill"
     });
+  } finally {
+    await session.endSession();
   }
 }
+
+
 
 /* --------------------------------------------------
    DELETE BILL
 -------------------------------------------------- */
 async function deleteBill(req, res) {
+  const session = client.startSession();
+
   try {
     const { id } = req.params;
 
     if (!ObjectId.isValid(id))
       return res.status(400).json({ success: false, message: "Invalid bill ID" });
 
-    const result = await billsCol.deleteOne({ _id: new ObjectId(id) });
+    await session.startTransaction();
 
-    if (!result.deletedCount)
-      return res.status(404).json({ success: false, message: "Bill not found" });
+    /* ---------------------------------------------
+       1️⃣ FETCH BILL
+    --------------------------------------------- */
+    const bill = await billsCol.findOne(
+      { _id: new ObjectId(id) },
+      { session }
+    );
+
+    if (!bill)
+      throw new Error("Bill not found");
+
+    /* ---------------------------------------------
+       2️⃣ DELETE BILL
+    --------------------------------------------- */
+    await billsCol.deleteOne(
+      { _id: bill._id },
+      { session }
+    );
+
+    /* ---------------------------------------------
+       3️⃣ DECREMENT THREAD TOTAL COST
+    --------------------------------------------- */
+    await expenseThreadsCol.updateOne(
+      { _id: bill.expenseThreadId },
+      { $inc: { total_cost: -Number(bill.amount) } },
+      { session }
+    );
+
+    await session.commitTransaction();
 
     return res.status(200).json({
       success: true,
       message: "Bill deleted successfully"
     });
+
   } catch (error) {
+    await session.abortTransaction();
     console.error("DELETE BILL ERROR:", error);
+
     return res.status(500).json({
       success: false,
-      message: "Failed to delete bill"
+      message: error.message || "Failed to delete bill"
     });
+  } finally {
+    await session.endSession();
   }
 }
+
+
 
 module.exports = {
   getBills,

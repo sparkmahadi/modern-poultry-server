@@ -53,17 +53,17 @@ async function getExpenseThreadById(req, res) {
 -------------------------------------------------- */
 async function createExpenseThread(req, res) {
   try {
-    const { name, cost, description } = req.body;
+    const { name, total_cost, description } = req.body;
 
-    if (!name || cost === undefined)
+    if (!name || total_cost === undefined)
       return res.status(400).json({
         success: false,
-        message: "Name and cost are required"
+        message: "Name and total_cost are required"
       });
 
     const payload = {
       name: name.trim(),
-      cost: Number(cost),
+      total_cost: Number(total_cost),
       description: description || "",
       createdAt: new Date(),
       updatedAt: new Date()
@@ -91,7 +91,7 @@ async function createExpenseThread(req, res) {
 async function updateExpenseThread(req, res) {
   try {
     const { id } = req.params;
-    const { name, cost, description } = req.body;
+    const { name, description } = req.body;
 
     if (!ObjectId.isValid(id))
       return res.status(400).json({ success: false, message: "Invalid thread ID" });
@@ -99,7 +99,6 @@ async function updateExpenseThread(req, res) {
     const updateDoc = {
       $set: {
         ...(name && { name: name.trim() }),
-        ...(cost !== undefined && { cost: Number(cost) }),
         ...(description !== undefined && { description }),
         updatedAt: new Date()
       }
