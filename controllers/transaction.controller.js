@@ -8,6 +8,7 @@ const accountsCollection = db.collection("payment_accounts");
 exports.createTransaction = async (req, res) => {
   try {
     const transaction = req.body;
+    console.log('transaction body', transaction);
 
     if (!transaction.account_id) {
       return res.status(400).json({
@@ -35,18 +36,10 @@ exports.createTransaction = async (req, res) => {
 
     const lastBalance = account.balance || 0;
     const amount = transaction.amount || 0;
-console.log(transaction);
-    // Preserve your existing logic
-    if (transaction.transaction_type === "credit") {
-      transaction.balance_after_transaction = lastBalance + amount;
-    } else if (transaction.transaction_type === "debit") {
-      transaction.balance_after_transaction = lastBalance - amount;
-    } else {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid transaction type" });
-    }
+    console.log(transaction);
+    transaction.balance_after_transaction = lastBalance;
 
+    console.log('final form trans', transaction);
     // Insert transaction
     await transactionsCollection.insertOne(transaction);
 
