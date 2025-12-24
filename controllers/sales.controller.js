@@ -104,18 +104,18 @@ module.exports.createSell = async (req, res) => {
       {
         $inc: { total_sales: total_amount, total_due: due_amount > 0 ? due_amount : 0, due: due_amount, advance: advance_amount },
         $set: { last_Sale_date: sellDate },
-        $push: {
-          customer_history: {
-            date: sellDate,
-            type: "sale",
-            sale_id: memoId,
-            products,
-            total_amount,
-            paid_amount,
-            due_after_payment: due_amount,
-            remarks: "New sale created"
-          }
-        }
+        // $push: {
+        //   customer_history: {
+        //     date: sellDate,
+        //     type: "sale",
+        //     sale_id: memoId,
+        //     products,
+        //     total_amount,
+        //     paid_amount,
+        //     due_after_payment: due_amount,
+        //     remarks: "New sale created"
+        //   }
+        // }
       },
       { session }
     );
@@ -307,18 +307,18 @@ module.exports.updateSaleById = async (req, res) => {
         {
           $inc: { due: newDue - oldDue, advance: newAdvance - oldAdvance },
           $set: { last_payment_date: new Date() },
-          $push: {
-            customer_history: {
-              date: new Date(),
-              type: "sale_update",
-              sale_id: saleId,
-              products: payload.products || existingSale.products,
-              total_amount: newTotal,
-              paid_amount: newPaid,
-              due_after_payment: newDue,
-              remarks: "Sale updated"
-            }
-          }
+          // $push: {
+          //   customer_history: {
+          //     date: new Date(),
+          //     type: "sale_update",
+          //     sale_id: saleId,
+          //     products: payload.products || existingSale.products,
+          //     total_amount: newTotal,
+          //     paid_amount: newPaid,
+          //     due_after_payment: newDue,
+          //     remarks: "Sale updated"
+          //   }
+          // }
         },
         { session }
       );
@@ -415,16 +415,16 @@ module.exports.deleteSale = async(req, res) => {
             due: -dueDiff, 
             advance: -advanceDiff 
           },
-          $push: {
-            customer_history: {
-              date: new Date(),
-              type: "deleted_sale",
-              sale_id: saleId,
-              total_amount: existingSale.total_amount,
-              paid_amount: existingSale.paid_amount,
-              remarks: "Sale record deleted - Balances adjusted"
-            }
-          }
+          // $push: {
+          //   customer_history: {
+          //     date: new Date(),
+          //     type: "deleted_sale",
+          //     sale_id: saleId,
+          //     total_amount: existingSale.total_amount,
+          //     paid_amount: existingSale.paid_amount,
+          //     remarks: "Sale record deleted - Balances adjusted"
+          //   }
+          // }
         },
         { session }
       );
@@ -520,16 +520,16 @@ module.exports.receiveCustomerDue = async (req, res) => {
         {
           $inc: { due: -payAmount },
           $set: { last_payment_date: new Date() },
-          $push: {
-            customer_history: {
-              date: new Date(),
-              type: "payment",
-              sale_id: saleId,
-              paid_amount: payAmount,
-              due_after_payment: newDue,
-              remarks: "Customer due payment received"
-            }
-          }
+          // $push: {
+          //   customer_history: {
+          //     date: new Date(),
+          //     type: "payment",
+          //     sale_id: saleId,
+          //     paid_amount: payAmount,
+          //     due_after_payment: newDue,
+          //     remarks: "Customer due payment received"
+          //   }
+          // }
         },
         { session }
       );
