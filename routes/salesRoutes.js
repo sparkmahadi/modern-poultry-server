@@ -1,5 +1,5 @@
 const express = require("express");
-const { createSell, getSales, getCashSales, getDueSales, getSaleById, updateSaleById, getSalesByCustomerId, receiveCustomerDue, deleteSale, getSalesReport } = require("../controllers/sales.controller");
+const { createSell, getSales, getSaleById, updateSaleById, getSalesByCustomerId, receiveCustomerDue, deleteSale, getSalesReport, receiveCustomerDueManually } = require("../controllers/sales.controller");
 
 const router = express.Router();
 
@@ -7,11 +7,10 @@ const router = express.Router();
 router.get("/", getSales);
 router.get("/reports/:type", getSalesReport);
 
-// router.get("/cash-sales", getCashSales);
-// router.get("/due-sales", getDueSales);
 router.post("/create", createSell);
 
 router.patch("/receive-customer-due/:saleId", receiveCustomerDue)
+router.patch("/receive-customer-due-manually", receiveCustomerDueManually)
 
 // New routes for single sale
 router.get("/customer-sales/:customerId", getSalesByCustomerId);

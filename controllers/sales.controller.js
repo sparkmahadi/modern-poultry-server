@@ -104,18 +104,6 @@ module.exports.createSell = async (req, res) => {
       {
         $inc: { total_sales: total_amount, total_due: due_amount > 0 ? due_amount : 0, due: due_amount, advance: advance_amount },
         $set: { last_Sale_date: sellDate },
-        // $push: {
-        //   customer_history: {
-        //     date: sellDate,
-        //     type: "sale",
-        //     sale_id: memoId,
-        //     products,
-        //     total_amount,
-        //     paid_amount,
-        //     due_after_payment: due_amount,
-        //     remarks: "New sale created"
-        //   }
-        // }
       },
       { session }
     );
@@ -289,7 +277,7 @@ module.exports.updateSaleById = async (req, res) => {
 
   try {
     const saleId = new ObjectId(req.params.id);
-    
+
     const { memoNo, date, customer_id, products, total_amount, paid_amount = 0, payment_method, account_id } = req.body;
     const payload = req.body;
 
@@ -395,7 +383,7 @@ module.exports.updateSaleById = async (req, res) => {
 
     const oldDue = oldTotal - oldPaid;
     const newDue = newTotal - newPaid;
-    
+
     const newAdvance = newPaid > total_amount ? newPaid - total_amount : 0;
     const oldAdvance = oldPaid > oldTotal ? oldPaid - oldTotal : 0;
 
@@ -405,18 +393,6 @@ module.exports.updateSaleById = async (req, res) => {
         {
           $inc: { due: newDue - oldDue, advance: newAdvance - oldAdvance },
           $set: { last_payment_date: new Date() },
-          // $push: {
-          //   customer_history: {
-          //     date: new Date(),
-          //     type: "sale_update",
-          //     sale_id: saleId,
-          //     products: payload.products || existingSale.products,
-          //     total_amount: newTotal,
-          //     paid_amount: newPaid,
-          //     due_after_payment: newDue,
-          //     remarks: "Sale updated"
-          //   }
-          // }
         },
         { session }
       );
@@ -459,12 +435,12 @@ module.exports.updateSaleById = async (req, res) => {
 
 
 // -------------------- DELETE SALE --------------------
-module.exports.deleteSale = async(req, res) => {
+module.exports.deleteSale = async (req, res) => {
   const session = client.startSession();
 
   try {
     const saleId = new ObjectId(req.params.id);
-    
+
     // Check if the sale exists before starting transaction
     const existingSale = await salesCol.findOne({ _id: saleId });
     if (!existingSale) {
@@ -498,7 +474,7 @@ module.exports.deleteSale = async(req, res) => {
     // 3️⃣ Update Customer Balances
     if (existingSale.customer_id) {
       const customerObjId = new ObjectId(existingSale.customer_id);
-      
+
       // Calculate differences to revert
       const balanceDiff = existingSale.total_amount - existingSale.paid_amount;
       const dueDiff = balanceDiff > 0 ? balanceDiff : 0;
@@ -507,11 +483,11 @@ module.exports.deleteSale = async(req, res) => {
       await customersCol.updateOne(
         { _id: customerObjId },
         {
-          $inc: { 
-            total_sale: -existingSale.total_amount, 
-            total_due: -dueDiff, 
-            due: -dueDiff, 
-            advance: -advanceDiff 
+          $inc: {
+            total_sale: -existingSale.total_amount,
+            total_due: -dueDiff,
+            due: -dueDiff,
+            advance: -advanceDiff
           },
           // $push: {
           //   customer_history: {
@@ -543,7 +519,7 @@ module.exports.deleteSale = async(req, res) => {
   } finally {
     await session.endSession();
   }
-}
+};
 
 
 
@@ -618,16 +594,6 @@ module.exports.receiveCustomerDue = async (req, res) => {
         {
           $inc: { due: -payAmount },
           $set: { last_payment_date: new Date() },
-          // $push: {
-          //   customer_history: {
-          //     date: new Date(),
-          //     type: "payment",
-          //     sale_id: saleId,
-          //     paid_amount: payAmount,
-          //     due_after_payment: newDue,
-          //     remarks: "Customer due payment received"
-          //   }
-          // }
         },
         { session }
       );
@@ -646,4 +612,230 @@ module.exports.receiveCustomerDue = async (req, res) => {
   } finally {
     await session.endSession();
   }
-}
+};
+
+
+module.exports.receiveCustomerDueManually = async (req, res) => {
+  const session = client.startSession();
+
+  console.log("🚀 HIT receiveCustomerDueManually");
+  console.log("➡️ Request body:", req.body);
+
+  try {
+    /* ==================================================
+       INPUT VALIDATION
+       ================================================== */
+    const { paidAmount, paymentAccountId, customerId } = req.body;
+
+    if (!paidAmount || paidAmount <= 0) {
+      console.log("❌ Invalid paidAmount:", paidAmount);
+      return res.status(400).json({ success: false, message: "Invalid payment amount" });
+    }
+
+    if (!paymentAccountId) {
+      console.log("❌ Missing paymentAccountId");
+      return res.status(400).json({ success: false, message: "Payment account is required" });
+    }
+
+    if (!customerId) {
+      console.log("❌ Missing customerId");
+      return res.status(400).json({ success: false, message: "Customer is required" });
+    }
+
+    /* ==================================================
+       START TRANSACTION
+       ================================================== */
+    await session.startTransaction();
+    console.log("🧾 MongoDB transaction started");
+
+    let remainingAmount = Number(paidAmount);
+    console.log("💰 Initial remainingAmount:", remainingAmount);
+
+    /* ==================================================
+       1️⃣ FETCH CUSTOMER DUE SALES (FIFO)
+       ================================================== */
+    const sales = await salesCol
+      .find({
+        customer_id: new ObjectId(customerId),
+        $expr: { $gt: ["$total_amount", "$paid_amount"] }
+      })
+      .sort({ date: 1 })
+      .toArray();
+
+    console.log(`📄 Found ${sales.length} due sale(s) for customer`, customerId);
+
+    // return res.status(404);
+
+    /* ==================================================
+       2️⃣ DISTRIBUTE PAYMENT ACROSS SALES
+       ================================================== */
+    for (const sale of sales) {
+      if (remainingAmount <= 0) {
+        console.log("✅ Remaining amount exhausted, stopping loop");
+        break;
+      }
+
+      const total = Number(sale.total_amount || 0);
+      const paid = Number(sale.paid_amount || 0);
+      const due = total - paid;
+
+      console.log("➡️ Processing sale:", {
+        saleId: sale._id,
+        total,
+        paid,
+        due,
+        remainingAmount
+      });
+
+      if (due <= 0) {
+        console.log("⏭️ Sale already fully paid, skipping:", sale._id);
+        continue;
+      }
+
+      const payNow = Math.min(due, remainingAmount);
+      console.log("💸 Paying now:", payNow, "for sale:", sale._id);
+
+      /* ----------------------------------------------
+         CREDIT PAYMENT ACCOUNT
+      ---------------------------------------------- */
+      const paymentResult = await updateAccountBalance({
+        client,
+        db,
+        amount: payNow,
+        transactionType: "credit",
+        entrySource: "customer_due_payment_manual",
+        accountId: paymentAccountId,
+        details: {
+          saleId: sale._id,
+          remarks: `Manual customer payment applied to sale ${sale._id}`
+        },
+        session
+      });
+
+      if (!paymentResult.success) {
+        console.error("❌ Account balance update failed:", paymentResult);
+        throw new Error(paymentResult.message);
+      }
+
+      console.log("✅ Account credited successfully for sale:", sale._id);
+
+      const newPaid = paid + payNow;
+      const newDue = total - newPaid;
+
+      /* ----------------------------------------------
+         UPDATE SALE
+      ---------------------------------------------- */
+      await salesCol.updateOne(
+        { _id: sale._id },
+        {
+          $set: {
+            paid_amount: newPaid,
+            due_amount: newDue,
+            paymentAccountId,
+            last_payment_date: new Date()
+          },
+          $push: {
+            payment_history: {
+              date: new Date(),
+              amount: payNow,
+              account_id: paymentAccountId,
+              due_after_payment: newDue,
+              remarks: "Manual customer due payment"
+            }
+          }
+        },
+        { session }
+      );
+
+      console.log("📝 Sale updated:", {
+        saleId: sale._id,
+        newPaid,
+        newDue
+      });
+
+      /* ----------------------------------------------
+         UPDATE CUSTOMER LEDGER
+      ---------------------------------------------- */
+      await customersCol.updateOne(
+        { _id: new ObjectId(customerId) },
+        {
+          $inc: { due: -payNow },
+          $set: { last_payment_date: new Date() }
+        },
+        { session }
+      );
+
+      console.log("👤 Customer due reduced by:", payNow);
+
+      remainingAmount -= payNow;
+      console.log("💰 Remaining amount after sale:", remainingAmount);
+    }
+
+    /* ==================================================
+       3️⃣ HANDLE EXTRA PAYMENT AS ADVANCE
+       ================================================== */
+    if (remainingAmount > 0) {
+      console.log("➕ Remaining amount treated as customer advance:", remainingAmount);
+
+      await customersCol.updateOne(
+        { _id: new ObjectId(customerId) },
+        {
+          $inc: { manual_advance: remainingAmount }
+        },
+        { session }
+      );
+
+
+      const paymentResult = await updateAccountBalance({
+        client,
+        db,
+        amount: remainingAmount,
+        transactionType: "credit",
+        entrySource: "customer_manual_advance_payment",
+        accountId: paymentAccountId,
+        details: {
+          remarks: `Manual customer advance from receieve manual due`
+        },
+        session
+      });
+
+      if (!paymentResult.success) {
+        console.error("❌ Account balance update failed:", paymentResult);
+        throw new Error(paymentResult.message);
+      }
+
+      console.log("✅ Account credited successfully for sale advance");
+    }
+
+    /* ==================================================
+       COMMIT TRANSACTION
+       ================================================== */
+    await session.commitTransaction();
+    console.log("✅ Transaction committed successfully");
+
+    return res.status(200).json({
+      success: true,
+      message: "Customer payment distributed successfully",
+      summary: {
+        totalPaid: paidAmount,
+        appliedToDue: paidAmount - remainingAmount,
+        advance: remainingAmount
+      }
+    });
+
+  } catch (err) {
+    console.error("🔥 receiveCustomerDueManually failed:", err);
+
+    await session.abortTransaction();
+    console.log("↩️ Transaction rolled back");
+
+    return res.status(500).json({
+      success: false,
+      message: err.message
+    });
+
+  } finally {
+    await session.endSession();
+    console.log("🔚 MongoDB session ended");
+  }
+};

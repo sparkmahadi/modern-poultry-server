@@ -172,17 +172,31 @@ async function getPurchaseById(req, res) {
   }
 }
 
+async function getPurchasesBySupplierId(req, res) {
+  const { supplierId } = req.params;
+  if (!supplierId) return res.json({ success: false, message: 'Supplier id not found' });
+  try {
+    const purchases = await purchasesCol.find({
+      supplier_id: new ObjectId(supplierId)
+    }).toArray();
+    res.status(200).json({ success: true, data: purchases });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 
 async function createPurchase(req, res) {
   const session = client.startSession();
 
   try {
-    const { products, total_amount, paid_amount = 0, payment_method = "cash", account_id, supplier_id } = req.body;
+    const { products, total_amount, paid_amount = 0, payment_method = "cash", account_id, supplier_id, date } = req.body;
     if (!products || !products.length) return res.status(400).json({ success: false, message: "Products array cannot be empty" });
     if (paid_amount > 0 && !account_id) return res.status(400).json({ success: false, message: "Account selection is required for payment" });
 
     const invoice_id = new ObjectId();
-    const purchaseDate = new Date();
+    const purchaseDate = date || new Date();
+
     const payment_due = total_amount - paid_amount;
 
     await session.startTransaction();
@@ -305,63 +319,63 @@ async function updatePurchase(req, res) {
    2️⃣ INVENTORY ADJUSTMENT (USING SERVICES)
 -------------------------------------------------- */
 
-const oldMap = new Map();
-existingPurchase.products.forEach(p => {
-  oldMap.set(p.product_id.toString(), p);
-});
-
-const newMap = new Map();
-payload.products.forEach(p => {
-  newMap.set(p.product_id.toString(), p);
-});
-
-/* -------------------------------
-   Added or updated products
--------------------------------- */
-for (const [productId, newProd] of newMap) {
-  const oldProd = oldMap.get(productId);
-
-  if (!oldProd) {
-    // ➕ Newly added product
-    const inc = await increaseInventoryStock({
-      product_id: productId,
-      qty: newProd.qty
+    const oldMap = new Map();
+    existingPurchase.products.forEach(p => {
+      oldMap.set(p.product_id.toString(), p);
     });
 
-    if (!inc.success) throw new Error(inc.message);
+    const newMap = new Map();
+    payload.products.forEach(p => {
+      newMap.set(p.product_id.toString(), p);
+    });
 
-  } else {
-    const diff = newProd.qty - oldProd.qty;
+    /* -------------------------------
+       Added or updated products
+    -------------------------------- */
+    for (const [productId, newProd] of newMap) {
+      const oldProd = oldMap.get(productId);
 
-    if (diff > 0) {
-      const inc = await increaseInventoryStock({
-        product_id: productId,
-        qty: diff
-      });
-      if (!inc.success) throw new Error(inc.message);
+      if (!oldProd) {
+        // ➕ Newly added product
+        const inc = await increaseInventoryStock({
+          product_id: productId,
+          qty: newProd.qty
+        });
 
-    } else if (diff < 0) {
-      const dec = await decreaseInventoryStock({
-        product_id: productId,
-        qty: Math.abs(diff)
-      });
-      if (!dec.success) throw new Error(dec.message);
+        if (!inc.success) throw new Error(inc.message);
+
+      } else {
+        const diff = newProd.qty - oldProd.qty;
+
+        if (diff > 0) {
+          const inc = await increaseInventoryStock({
+            product_id: productId,
+            qty: diff
+          });
+          if (!inc.success) throw new Error(inc.message);
+
+        } else if (diff < 0) {
+          const dec = await decreaseInventoryStock({
+            product_id: productId,
+            qty: Math.abs(diff)
+          });
+          if (!dec.success) throw new Error(dec.message);
+        }
+      }
     }
-  }
-}
 
-/* -------------------------------
-   Removed products
--------------------------------- */
-for (const [productId, oldProd] of oldMap) {
-  if (!newMap.has(productId)) {
-    const dec = await decreaseInventoryStock({
-      product_id: productId,
-      qty: oldProd.qty
-    });
-    if (!dec.success) throw new Error(dec.message);
-  }
-}
+    /* -------------------------------
+       Removed products
+    -------------------------------- */
+    for (const [productId, oldProd] of oldMap) {
+      if (!newMap.has(productId)) {
+        const dec = await decreaseInventoryStock({
+          product_id: productId,
+          qty: oldProd.qty
+        });
+        if (!dec.success) throw new Error(dec.message);
+      }
+    }
 
 
 
@@ -508,6 +522,7 @@ async function paySupplierDue(req, res) {
   const purchaseId = new ObjectId(req.params.id);
   const { payAmount, paymentAccountId } = req.body;
 
+  console.log("paySupplierDue", purchaseId, req.body);
   if (!payAmount || payAmount <= 0) return res.status(400).json({ success: false, message: "Invalid payment amount" });
   if (!paymentAccountId) return res.status(400).json({ success: false, message: "Payment account is required" });
 
@@ -519,7 +534,7 @@ async function paySupplierDue(req, res) {
     const total = Number(purchase.total_amount || 0);
     const due = total - oldPaid;
 
-    if (payAmount > due) return res.status(400).json({ success: false, message: "Payment exceeds due amount" });
+    // if (payAmount > due) return res.status(400).json({ success: false, message: "Payment exceeds due amount" });
 
     // Debit account
     const paymentResult = await updateAccountBalance({
@@ -531,6 +546,7 @@ async function paySupplierDue(req, res) {
       accountId: paymentAccountId,
       details: { invoiceId: purchaseId, remarks: `Supplier due payment for purchase ${purchaseId}` }
     });
+    console.log("paymentResult", paymentResult);
     if (!paymentResult.success) return res.status(400).json(paymentResult);
 
     // Update purchase payment
@@ -539,7 +555,18 @@ async function paySupplierDue(req, res) {
 
     await purchasesCol.updateOne(
       { _id: purchaseId },
-      { $set: { paid_amount: updatedPaid, payment_due: newDue, paymentAccountId, last_payment_date: new Date() } }
+      {
+        $set: { paid_amount: updatedPaid, payment_due: newDue, paymentAccountId, last_payment_date: new Date(), },
+        $push: {
+          payment_history: {
+            date: new Date(),
+            paymentAccountId,
+            paid_amount: updatedPaid,
+            due_after_payment: newDue,
+            remarks: "Supplier Specific due payment"
+          }
+        }
+      }
     );
 
     // Update supplier balances
@@ -651,87 +678,177 @@ async function deletePurchase(req, res) {
   }
 }
 
+async function paySupplierDueManually(req, res) {
+  const session = client.startSession();
+  console.log('hit paySupplierDueManually');
+  try {
+    const { paidAmount, paymentAccountId, supplierId } = req.body;
 
-// /* ======================
-//    INVENTORY HELPERS
-//    ====================== */
-// async function addToInventory(product, invoiceId) {
-//   try {
-//     const pid = extractProductId(product.product_id);
+    if (!paidAmount || paidAmount <= 0)
+      return res.status(400).json({ success: false, message: "Invalid payment amount" });
 
-//     if (!pid) {
-//       return {
-//         success: false,
-//         message: `Invalid product_id for: ${product?.name}`,
-//       };
-//     }
+    if (!paymentAccountId)
+      return res.status(400).json({ success: false, message: "Payment account is required" });
 
-//     const productObjectId = new ObjectId(pid);
+    if (!supplierId)
+      return res.status(400).json({ success: false, message: "Supplier is required" });
 
-//     if (!product.qty || !product.purchase_price) {
-//       return {
-//         success: false,
-//         message: `Invalid qty or purchase_price for product: ${product.name}`,
-//       };
-//     }
+    await session.startTransaction();
 
-//     const purchaseRecord = {
-//       invoice_id: invoiceId.toString(),
-//       qty: product.qty,
-//       purchase_price: product.purchase_price,
-//       subtotal: product.subtotal,
-//       date: new Date(),
-//     };
+    let remainingAmount = Number(paidAmount);
 
-//     const existingItem = await inventoryCol.findOne({
-//       product_id: productObjectId,
-//     });
+    /* --------------------------------------------------
+    1️⃣ Fetch supplier due purchases (oldest first)
+    -------------------------------------------------- */
+    const purchases = await purchasesCol
+      .find({
+        supplier_id: new ObjectId(supplierId),
+        $expr: { $gt: ["$total_amount", "$paid_amount"] }
+      })
+      .sort({ date: 1 })
+      .toArray();
 
-//     if (existingItem) {
-//       const oldQty = existingItem.stock_qty || 0;
-//       const oldAvg = existingItem.average_purchase_price ?? product.purchase_price;
+    // return console.log("paySupplierDueManually", purchases);
+    /* --------------------------------------------------
+       2️⃣ Pay purchases step-by-step
+    -------------------------------------------------- */
+    for (const purchase of purchases) {
+      if (remainingAmount <= 0) break;
 
-//       const newAvg =
-//         (oldAvg * oldQty + product.purchase_price * product.qty) /
-//         (oldQty + product.qty);
+      const total = Number(purchase.total_amount || 0);
+      const paid = Number(purchase.paid_amount || 0);
+      const due = total - paid;
 
-//       await inventoryCol.updateOne(
-//         { product_id: productObjectId },
-//         {
-//           $inc: { stock_qty: product.qty },
-//           $set: {
-//             last_purchase_price: product.purchase_price,
-//             average_purchase_price: newAvg,
-//             last_updated: new Date(),
-//           },
-//           $push: { purchase_history: purchaseRecord },
-//         }
-//       );
+      if (due <= 0) continue;
 
-//       return { success: true, message: `Inventory updated for ${product.name}` };
-//     } else {
-//       await inventoryCol.insertOne({
-//         product_id: productObjectId,
-//         item_name: product.name,
-//         stock_qty: product.qty,
-//         sale_price: null,
-//         last_purchase_price: product.purchase_price,
-//         average_purchase_price: product.purchase_price,
-//         reorder_level: 0,
-//         last_updated: new Date(),
-//         purchase_history: [purchaseRecord],
-//         sale_history: [],
-//       });
+      const payNow = Math.min(due, remainingAmount);
 
-//       return { success: true, message: `New inventory item added: ${product.name}` };
-//     }
-//   } catch (error) {
-//     return {
-//       success: false,
-//       message: `Failed to update inventory for ${product?.name}: ${error.message}`,
-//     };
-//   }
-// }
+      /* ---- Debit account ---- */
+      const paymentResult = await updateAccountBalance({
+        client,
+        db,
+        amount: payNow,
+        transactionType: "debit",
+        entrySource: "supplier_due_payment_manual",
+        accountId: paymentAccountId,
+        details: {
+          purchaseId: purchase._id,
+          remarks: `Manual supplier payment applied to purchase ${purchase._id}`
+        },
+        session
+      });
+
+      console.log("purchase paymentResult", paymentResult);
+
+      if (!paymentResult.success) throw new Error(paymentResult.message);
+
+      const newPaid = paid + payNow;
+      const newDue = total - newPaid;
+
+      /* ---- Update purchase ---- */
+      await purchasesCol.updateOne(
+        { _id: purchase._id },
+        {
+          $set: {
+            paid_amount: newPaid,
+            payment_due: newDue,
+            paymentAccountId,
+            last_payment_date: new Date()
+          },
+          $push: {
+            payment_history: {
+              date: new Date(),
+              paymentAccountId,
+              paid_amount: newPaid,
+              due_after_payment: newDue,
+              remarks: "Supplier Manual due payment"
+            }
+          }
+        },
+        { session }
+      );
+
+      /* ---- Update supplier ledger ---- */
+      await suppliersCol.updateOne(
+        { _id: new ObjectId(supplierId) },
+        {
+          $inc: { due: -payNow },
+          $set: { last_payment_date: new Date() },
+          $push: {
+            supplier_history: {
+              date: new Date(),
+              type: "payment",
+              purchase_id: purchase._id,
+              products: purchase.products,
+              total_amount: total,
+              paid_amount: newPaid,
+              due_after_payment: newDue,
+              remarks: "Manual supplier due payment"
+            }
+          }
+        },
+        { session }
+      );
+
+      remainingAmount -= payNow;
+    }
+
+    /* --------------------------------------------------
+       3️⃣ Remaining amount → supplier advance
+    -------------------------------------------------- */
+    if (remainingAmount > 0) {
+
+      const paymentResult = await updateAccountBalance({
+        client,
+        db,
+        amount: remainingAmount,
+        transactionType: "debit",
+        entrySource: "supplier_advance_payment_manual",
+        accountId: paymentAccountId,
+        details: {
+          remarks: `Manual advance payment applied to supplier in purchase`
+        },
+        session
+      });
+
+      console.log("purchase paymentResult", paymentResult);
+
+      if (!paymentResult.success) throw new Error(paymentResult.message);
+
+
+      await suppliersCol.updateOne(
+        { _id: new ObjectId(supplierId) },
+        {
+          $inc: { advance: remainingAmount }
+        },
+        { session }
+      );
+    }
+
+    /* --------------------------------------------------
+       ✅ Commit Transaction
+    -------------------------------------------------- */
+    await session.commitTransaction();
+
+    return res.status(200).json({
+      success: true,
+      message: "Supplier payment distributed successfully",
+      summary: {
+        totalPaid: paidAmount,
+        appliedToDue: paidAmount - remainingAmount,
+        advance: remainingAmount
+      }
+    });
+
+  } catch (err) {
+    await session.abortTransaction();
+    console.error("paySupplierDueManually failed:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
+  }
+};
+
 
 
 module.exports = {
@@ -741,5 +858,7 @@ module.exports = {
   updatePurchase,
   deletePurchase,
   paySupplierDue,
-  getPurchaseReport
+  getPurchaseReport,
+  paySupplierDueManually,
+  getPurchasesBySupplierId
 };
