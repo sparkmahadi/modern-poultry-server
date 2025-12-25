@@ -147,6 +147,104 @@ module.exports.getSales = async (req, res) => {
   }
 };
 
+module.exports.getSalesReport = async (req, res) => {
+  try {
+    const { type } = req.params;
+    const { date, month, year, from, to } = req.query;
+
+    let matchQuery = {};
+
+    /* --------------------------------------------------
+       DAILY REPORT
+       /reports/daily?date=YYYY-MM-DD
+    -------------------------------------------------- */
+    if (type === "daily") {
+      if (!date)
+        return res.status(400).json({ success: false, message: "Date is required" });
+
+      const start = new Date(date);
+      const end = new Date(date);
+      end.setDate(end.getDate() + 1);
+
+      matchQuery.date = { $gte: start, $lt: end };
+    }
+
+    /* --------------------------------------------------
+       MONTHLY REPORT
+       /reports/monthly?month=12&year=2023
+    -------------------------------------------------- */
+    else if (type === "monthly") {
+      if (!month || !year)
+        return res.status(400).json({ success: false, message: "Month and year are required" });
+
+      const start = new Date(year, month - 1, 1);
+      const end = new Date(year, month, 1);
+
+      matchQuery.date = { $gte: start, $lt: end };
+    }
+
+    /* --------------------------------------------------
+       YEARLY REPORT
+       /reports/yearly?year=2023
+    -------------------------------------------------- */
+    else if (type === "yearly") {
+      if (!year)
+        return res.status(400).json({ success: false, message: "Year is required" });
+
+      const start = new Date(year, 0, 1);
+      const end = new Date(Number(year) + 1, 0, 1);
+
+      matchQuery.date = { $gte: start, $lt: end };
+    }
+
+    /* --------------------------------------------------
+       CUSTOM RANGE REPORT
+       /reports/range?from=YYYY-MM-DD&to=YYYY-MM-DD
+    -------------------------------------------------- */
+    else if (type === "range") {
+      if (!from || !to)
+        return res.status(400).json({ success: false, message: "From and To dates are required" });
+
+      matchQuery.date = {
+        $gte: new Date(from),
+        $lte: new Date(to),
+      };
+    }
+
+    else {
+      return res.status(400).json({ success: false, message: "Invalid report type" });
+    }
+
+    /* --------------------------------------------------
+       FETCH SALES
+    -------------------------------------------------- */
+    const sales = await salesCol
+      .find(matchQuery)
+      .sort({ date: -1 })
+      .toArray();
+
+    /* --------------------------------------------------
+       SUMMARY
+    -------------------------------------------------- */
+    const totalAmount = sales.reduce((sum, s) => sum + (s.total_amount || 0), 0);
+    const totalPaid = sales.reduce((sum, s) => sum + (s.paid_amount || 0), 0);
+
+    res.status(200).json({
+      success: true,
+      count: sales.length,
+      summary: {
+        totalAmount,
+        totalPaid,
+        due: totalAmount - totalPaid,
+      },
+      data: sales,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
 
 /* =====================================================
    GET SALES BY CUSTOMER
