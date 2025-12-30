@@ -11,16 +11,90 @@ const suppliersCol = db.collection("suppliers");
 
 // -------------------- GET PURCHASES --------------------
 async function getPurchases(req, res) {
-  console.log('hit getPurchases');
-  const query = req.query.type;
+  console.log("hit getPurchases");
+
   try {
-    const filter = query ? { payment_due: { $gt: 0 } } : {};
-    const purchases = await purchasesCol.find(filter).sort({ date: -1 }).toArray();
-    res.status(200).json({ success: true, data: purchases });
+    const { type } = req.query;
+
+    /* -----------------------------------------
+       FILTER: ONLY DUE PURCHASES (optional)
+       ?type=due
+    ----------------------------------------- */
+    const matchStage =
+      type === "due"
+        ? { payment_due: { $gt: 0 } }
+        : {};
+
+    /* -----------------------------------------
+       AGGREGATION PIPELINE
+    ----------------------------------------- */
+    const purchases = await purchasesCol.aggregate([
+      { $match: matchStage },
+
+      /* -------------------------------------
+         JOIN SUPPLIER COLLECTION
+      ------------------------------------- */
+      {
+        $lookup: {
+          from: "suppliers",
+          localField: "supplier_id",
+          foreignField: "_id",
+          as: "supplier"
+        }
+      },
+
+      /* -------------------------------------
+         FLATTEN SUPPLIER ARRAY
+      ------------------------------------- */
+      {
+        $unwind: {
+          path: "$supplier",
+          preserveNullAndEmptyArrays: true
+        }
+      },
+
+      /* -------------------------------------
+         SHAPE FINAL RESPONSE
+      ------------------------------------- */
+      {
+        $addFields: {
+          supplier_name: "$supplier.name"
+        }
+      },
+
+      /* -------------------------------------
+         REMOVE EXTRA DATA
+      ------------------------------------- */
+      {
+        $project: {
+          supplier: 0
+        }
+      },
+
+      /* -------------------------------------
+         SORT BY DATE
+      ------------------------------------- */
+      {
+        $sort: { date: -1 }
+      }
+    ]).toArray();
+
+    res.status(200).json({
+      success: true,
+      count: purchases.length,
+      data: purchases
+    });
+
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    console.error("getPurchases error:", err);
+    res.status(500).json({
+      success: false,
+      message: err.message
+    });
   }
 }
+
+
 
 
 async function getPurchaseReport(req, res) {
