@@ -489,16 +489,6 @@ module.exports.deleteSale = async (req, res) => {
             due: -dueDiff,
             advance: -advanceDiff
           },
-          // $push: {
-          //   customer_history: {
-          //     date: new Date(),
-          //     type: "deleted_sale",
-          //     sale_id: saleId,
-          //     total_amount: existingSale.total_amount,
-          //     paid_amount: existingSale.paid_amount,
-          //     remarks: "Sale record deleted - Balances adjusted"
-          //   }
-          // }
         },
         { session }
       );
