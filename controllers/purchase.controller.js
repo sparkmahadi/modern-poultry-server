@@ -104,133 +104,106 @@ async function getPurchaseReport(req, res) {
 
     let matchQuery = {};
 
-    /* --------------------------------------------------
+    /* ------------------------------
        DAILY REPORT
-       /reports/daily?date=YYYY-MM-DD
-    -------------------------------------------------- */
+    ------------------------------ */
     if (type === "daily") {
-      if (!date)
-        return res.status(400).json({
-          success: false,
-          message: "Date is required",
-        });
-
+      if (!date) return res.status(400).json({ success: false, message: "Date is required" });
       const start = new Date(date);
+      start.setUTCHours(0, 0, 0, 0);
       const end = new Date(date);
-      end.setDate(end.getDate() + 1);
-
-      matchQuery.date = { $gte: start, $lt: end };
+      end.setUTCHours(23, 59, 59, 999);
+      
+      console.log("daily", start, end);
+      matchQuery.date = { $gte: start, $lte: end };
     }
 
-    /* --------------------------------------------------
+    /* ------------------------------
        MONTHLY REPORT
-       /reports/monthly?month=12&year=2025
-    -------------------------------------------------- */
+    ------------------------------ */
     else if (type === "monthly") {
-      if (!month || !year)
-        return res.status(400).json({
-          success: false,
-          message: "Month and year are required",
-        });
+      const numMonth = Number(month);
+      const numYear = Number(year);
+      if (!numMonth || !numYear) return res.status(400).json({ success: false, message: "Month and year are required" });
 
-      const start = new Date(year, month - 1, 1);
-      const end = new Date(year, month, 1);
-
-      matchQuery.date = { $gte: start, $lt: end };
+      const start = new Date(Date.UTC(numYear, numMonth - 1, 1, 0, 0, 0));
+      const end = new Date(Date.UTC(numYear, numMonth, 0, 23, 59, 59, 999)); // last day of month
+      console.log("monthly", start, end);
+      matchQuery.date = { $gte: start, $lte: end };
     }
 
-    /* --------------------------------------------------
+    /* ------------------------------
        YEARLY REPORT
-       /reports/yearly?year=2025
-    -------------------------------------------------- */
+    ------------------------------ */
     else if (type === "yearly") {
-      if (!year)
-        return res.status(400).json({
-          success: false,
-          message: "Year is required",
-        });
+      const numYear = Number(year);
+      if (!numYear) return res.status(400).json({ success: false, message: "Year is required" });
 
-      const start = new Date(year, 0, 1);
-      const end = new Date(Number(year) + 1, 0, 1);
-
-      matchQuery.date = { $gte: start, $lt: end };
+      const start = new Date(Date.UTC(numYear, 0, 1, 0, 0, 0));
+      const end = new Date(Date.UTC(numYear, 11, 31, 23, 59, 59, 999));
+      console.log("yearly", start, end);
+      matchQuery.date = { $gte: start, $lte: end };
     }
 
-    /* --------------------------------------------------
+    /* ------------------------------
        CUSTOM RANGE REPORT
-       /reports/range?from=YYYY-MM-DD&to=YYYY-MM-DD
-    -------------------------------------------------- */
+    ------------------------------ */
     else if (type === "range") {
-      if (!from || !to)
-        return res.status(400).json({
-          success: false,
-          message: "From and To dates are required",
-        });
+      if (!from || !to) return res.status(400).json({ success: false, message: "From and To dates are required" });
 
-      matchQuery.date = {
-        $gte: new Date(from),
-        $lte: new Date(to),
-      };
+      const start = new Date(from);
+      start.setUTCHours(0, 0, 0, 0);
+
+      const end = new Date(to);
+      end.setUTCHours(23, 59, 59, 999);
+
+      console.log("custom", start, end);
+      matchQuery.date = { $gte: start, $lte: end };
     }
 
-    else {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid report type",
-      });
-    }
+    else return res.status(400).json({ success: false, message: "Invalid report type" });
 
-    /* --------------------------------------------------
-       OPTIONAL FILTER: ONLY DUE PURCHASES
-       ?dueOnly=true
-    -------------------------------------------------- */
-    if (dueOnly === "true") {
-      matchQuery.payment_due = { $gt: 0 };
-    }
+    /* ------------------------------
+       ONLY DUE PURCHASES
+    ------------------------------ */
+    if (dueOnly === "true") matchQuery.payment_due = { $gt: 0 };
 
-    /* --------------------------------------------------
+    /* ------------------------------
        FETCH PURCHASES
-    -------------------------------------------------- */
-    const purchases = await purchasesCol
-      .find(matchQuery)
-      .sort({ date: -1 })
-      .toArray();
+    ------------------------------ */
+    const purchases = await purchasesCol.find(matchQuery).sort({ date: -1 }).toArray();
 
-    /* --------------------------------------------------
+    /* ------------------------------
+       NORMALIZE DATES
+    ------------------------------ */
+    const normalizedPurchases = purchases.map(p => ({
+      ...p,
+      date: p.date ? p.date.toISOString() : null,
+      last_payment_date: p.last_payment_date ? p.last_payment_date.toISOString() : null,
+      updated_at: p.updated_at ? p.updated_at.toISOString() : null,
+    }));
+
+    /* ------------------------------
        SUMMARY
-    -------------------------------------------------- */
-    const totalAmount = purchases.reduce(
-      (sum, p) => sum + (p.total_amount || 0),
-      0
-    );
-
-    const totalPaid = purchases.reduce(
-      (sum, p) => sum + (p.paid_amount || 0),
-      0
-    );
-
-    const totalDue = purchases.reduce(
-      (sum, p) => sum + (p.payment_due || 0),
-      0
-    );
+    ------------------------------ */
+    const totalAmount = normalizedPurchases.reduce((sum, p) => sum + (p.total_amount || 0), 0);
+    const totalPaid = normalizedPurchases.reduce((sum, p) => sum + (p.paid_amount || 0), 0);
+    const totalDue = normalizedPurchases.reduce((sum, p) => sum + (p.payment_due || 0), 0);
 
     res.status(200).json({
       success: true,
-      count: purchases.length,
-      summary: {
-        totalAmount,
-        totalPaid,
-        totalDue,
-      },
-      data: purchases,
+      count: normalizedPurchases.length,
+      summary: { totalAmount, totalPaid, totalDue },
+      data: normalizedPurchases,
     });
+
   } catch (err) {
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+    console.error("getPurchaseReport error:", err);
+    res.status(500).json({ success: false, message: err.message });
   }
 }
+
+
 
 
 // -------------------- GET SINGLE PURCHASE --------------------
@@ -270,8 +243,19 @@ async function createPurchase(req, res) {
     if (paid_amount > 0 && !account_id) return res.status(400).json({ success: false, message: "Account selection is required for payment" });
     if (!date) return res.status(400).json({ success: false, message: "Date is invalid." });
     // return res.status(400).json({ success: false, message: "Date is invalddddddid." });
+
+    // Parse date properly
+    let purchaseDate;
+    if (date) {
+      purchaseDate = new Date(date);
+      if (isNaN(purchaseDate.getTime())) {
+        return res.status(400).json({ success: false, message: "Invalid date format" });
+      }
+    } else {
+      purchaseDate = new Date(); // default to current date and time
+    }
+
     const invoice_id = new ObjectId();
-    const purchaseDate = date;
     const payment_due = total_amount - paid_amount;
 
     await session.startTransaction();
@@ -550,6 +534,19 @@ async function updatePurchase(req, res) {
     /* --------------------------------------------------
        6️⃣ UPDATE PURCHASE DOCUMENT
     -------------------------------------------------- */
+
+    // Parse date properly
+    let purchaseDate;
+    if (payload.date) {
+      purchaseDate = new Date(payload.date);
+      if (isNaN(purchaseDate.getTime())) {
+        return res.status(400).json({ success: false, message: "Invalid date format" });
+      }
+    } else {
+      purchaseDate = new Date(); // default to current date and time
+    }
+
+
     console.log("📄 Updating purchase document");
 
     await purchasesCol.updateOne(
@@ -564,7 +561,7 @@ async function updatePurchase(req, res) {
           account_id: payload.account_id ? new ObjectId(payload.account_id) : null,
           last_payment_date: new Date(),
           updated_at: new Date(),
-          date: payload.date,
+          date: purchaseDate,
         }
       },
       { session }
@@ -692,8 +689,15 @@ async function deletePurchase(req, res) {
 
     // 1️⃣ Revert inventory
     for (const item of existingPurchase.products || []) {
-      const result = await deductFromInventory(item, purchaseId, session);
-      if (!result.success) throw new Error(`Revert inventory failed: ${result.message}`);
+      // const result = await deductFromInventory(item, purchaseId, session);
+      // if (!result.success) throw new Error(`Revert inventory failed: ${result.message}`);
+      const dec = await decreaseInventoryStock({
+        product_id: item.product_id,
+        qty: Math.abs(item.qty)
+      });
+      if (!dec.success) throw new Error(dec.message);
+
+
     }
 
     // 2️⃣ Revert payment if any
