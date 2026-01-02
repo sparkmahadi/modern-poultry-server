@@ -265,12 +265,13 @@ async function createPurchase(req, res) {
 
   try {
     const { products, total_amount, paid_amount = 0, payment_method = "cash", account_id, supplier_id, date } = req.body;
+    console.log(req.body);
     if (!products || !products.length) return res.status(400).json({ success: false, message: "Products array cannot be empty" });
     if (paid_amount > 0 && !account_id) return res.status(400).json({ success: false, message: "Account selection is required for payment" });
-
+    if (!date) return res.status(400).json({ success: false, message: "Date is invalid." });
+    // return res.status(400).json({ success: false, message: "Date is invalddddddid." });
     const invoice_id = new ObjectId();
-    const purchaseDate = date || new Date();
-
+    const purchaseDate = date;
     const payment_due = total_amount - paid_amount;
 
     await session.startTransaction();
@@ -367,10 +368,10 @@ async function updatePurchase(req, res) {
   try {
     const purchaseId = new ObjectId(req.params.id);
     const payload = req.body;
-
+    // console.log("payload", payload);
+    // return res.status(404).json({ success: false, message: "Purchase not found" });
     console.log("➡️ Update purchase called:", purchaseId.toString());
     console.log("📦 Incoming payload products:", payload.products);
-
     await session.startTransaction();
     console.log("✅ Transaction started");
 
@@ -562,7 +563,8 @@ async function updatePurchase(req, res) {
           payment_method: payload.payment_method,
           account_id: payload.account_id ? new ObjectId(payload.account_id) : null,
           last_payment_date: new Date(),
-          updated_at: new Date()
+          updated_at: new Date(),
+          date: payload.date,
         }
       },
       { session }
