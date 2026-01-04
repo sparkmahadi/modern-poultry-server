@@ -1,7 +1,7 @@
 const { ObjectId } = require("mongodb");
 const { client, db } = require("../db.js");
 const { updateAccountBalance } = require("../services/accountBalance.service.js");
-const { increaseInventoryStock, decreaseInventoryStock, addToInventory } = require("../services/inventory.service.js");
+const { increaseInventoryStock, decreaseInventoryStock, addToInventory, recalculateAveragePurchasePrice } = require("../services/inventory.service.js");
 const { extractProductId } = require("../utils/id.util.js");
 
 const purchasesCol = db.collection("purchases");
@@ -373,68 +373,110 @@ async function updatePurchase(req, res) {
       console.log("❌ Purchase not found");
       return res.status(404).json({ success: false, message: "Purchase not found" });
     }
+    // new inventory adjustment (avg pur price)
+
+      // 🔁 CHANGE: revert old purchase completely
+    for (const oldProd of existingPurchase.products) {
+      await inventoryCol.updateOne(
+        { product_id: new ObjectId(oldProd.product_id) },
+        {
+          $inc: { stock_qty: -oldProd.qty },
+          $pull: {
+            purchase_history: { invoice_id: purchaseId.toString() }
+          }
+        },
+        { session }
+      );
+
+      // 🔁 CHANGE: recalc after removal
+      await recalculateAveragePurchasePrice(oldProd.product_id, session);
+    }
+
+    // 🔁 CHANGE: apply updated purchase
+    const newProducts = payload.products;
+    for (const newProd of newProducts) {
+      const purchaseRecord = {
+        invoice_id: purchaseId.toString(),
+        qty: newProd.qty,
+        purchase_price: newProd.purchase_price,
+        subtotal: newProd.subtotal,
+        date: new Date()
+      };
+
+      await inventoryCol.updateOne(
+        { product_id: new ObjectId(newProd.product_id) },
+        {
+          $inc: { stock_qty: newProd.qty },
+          $push: { purchase_history: purchaseRecord }
+        },
+        { upsert: true, session }
+      );
+
+      // 🔁 CHANGE: recalc after add
+      await recalculateAveragePurchasePrice(newProd.product_id, session);
+    }
 
     /* --------------------------------------------------
    2️⃣ INVENTORY ADJUSTMENT (USING SERVICES)
 -------------------------------------------------- */
 
-    const oldMap = new Map();
-    existingPurchase.products.forEach(p => {
-      oldMap.set(p.product_id.toString(), p);
-    });
+    // const oldMap = new Map();
+    // existingPurchase.products.forEach(p => {
+    //   oldMap.set(p.product_id.toString(), p);
+    // });
 
-    const newMap = new Map();
-    payload.products.forEach(p => {
-      newMap.set(p.product_id.toString(), p);
-    });
+    // const newMap = new Map();
+    // payload.products.forEach(p => {
+    //   newMap.set(p.product_id.toString(), p);
+    // });
 
-    /* -------------------------------
-       Added or updated products
-    -------------------------------- */
-    for (const [productId, newProd] of newMap) {
-      const oldProd = oldMap.get(productId);
+    // /* -------------------------------
+    //    Added or updated products
+    // -------------------------------- */
+    // for (const [productId, newProd] of newMap) {
+    //   const oldProd = oldMap.get(productId);
 
-      if (!oldProd) {
-        // ➕ Newly added product
-        const inc = await increaseInventoryStock({
-          product_id: productId,
-          qty: newProd.qty
-        });
+    //   if (!oldProd) {
+    //     // ➕ Newly added product
+    //     const inc = await increaseInventoryStock({
+    //       product_id: productId,
+    //       qty: newProd.qty
+    //     });
 
-        if (!inc.success) throw new Error(inc.message);
+    //     if (!inc.success) throw new Error(inc.message);
 
-      } else {
-        const diff = newProd.qty - oldProd.qty;
+    //   } else {
+    //     const diff = newProd.qty - oldProd.qty;
 
-        if (diff > 0) {
-          const inc = await increaseInventoryStock({
-            product_id: productId,
-            qty: diff
-          });
-          if (!inc.success) throw new Error(inc.message);
+    //     if (diff > 0) {
+    //       const inc = await increaseInventoryStock({
+    //         product_id: productId,
+    //         qty: diff
+    //       });
+    //       if (!inc.success) throw new Error(inc.message);
 
-        } else if (diff < 0) {
-          const dec = await decreaseInventoryStock({
-            product_id: productId,
-            qty: Math.abs(diff)
-          });
-          if (!dec.success) throw new Error(dec.message);
-        }
-      }
-    }
+    //     } else if (diff < 0) {
+    //       const dec = await decreaseInventoryStock({
+    //         product_id: productId,
+    //         qty: Math.abs(diff)
+    //       });
+    //       if (!dec.success) throw new Error(dec.message);
+    //     }
+    //   }
+    // }
 
-    /* -------------------------------
-       Removed products
-    -------------------------------- */
-    for (const [productId, oldProd] of oldMap) {
-      if (!newMap.has(productId)) {
-        const dec = await decreaseInventoryStock({
-          product_id: productId,
-          qty: oldProd.qty
-        });
-        if (!dec.success) throw new Error(dec.message);
-      }
-    }
+    // /* -------------------------------
+    //    Removed products
+    // -------------------------------- */
+    // for (const [productId, oldProd] of oldMap) {
+    //   if (!newMap.has(productId)) {
+    //     const dec = await decreaseInventoryStock({
+    //       product_id: productId,
+    //       qty: oldProd.qty
+    //     });
+    //     if (!dec.success) throw new Error(dec.message);
+    //   }
+    // }
 
 
 
@@ -548,6 +590,12 @@ async function updatePurchase(req, res) {
 
 
     console.log("📄 Updating purchase document");
+
+    //     await purchasesCol.updateOne(
+    //   { _id: new ObjectId(purchaseId) },
+    //   { $set: req.body },
+    //   { session }
+    // );
 
     await purchasesCol.updateOne(
       { _id: purchaseId },
@@ -688,16 +736,21 @@ async function deletePurchase(req, res) {
     await session.startTransaction();
 
     // 1️⃣ Revert inventory
-    for (const item of existingPurchase.products || []) {
-      // const result = await deductFromInventory(item, purchaseId, session);
-      // if (!result.success) throw new Error(`Revert inventory failed: ${result.message}`);
-      const dec = await decreaseInventoryStock({
-        product_id: item.product_id,
-        qty: Math.abs(item.qty)
-      });
-      if (!dec.success) throw new Error(dec.message);
 
-
+    for (const item of existingPurchase.products) {
+      await inventoryCol.updateOne(
+        { product_id: new ObjectId(item.product_id) },
+        {
+          $inc: { stock_qty: -item.qty },
+          $pull: {
+            purchase_history: { invoice_id: purchaseId.toString() }
+          }
+        },
+        { session }
+      );
+    
+    // 🔁 CHANGE: mandatory avg recalculation
+      await recalculateAveragePurchasePrice(item.product_id, session);
     }
 
     // 2️⃣ Revert payment if any

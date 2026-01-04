@@ -21,7 +21,7 @@ async function deductFromInventory(product, memoId, session) {
     }
 
     const saleRecord = {
-      memo_id: memoId.toString(),
+      memo_id: memoId,
       qty: product.qty,
       price: product.sale_price || product.Sale_price || 0,
       subtotal: product.subtotal || 0,
@@ -139,7 +139,7 @@ module.exports.getSalesReport = async (req, res) => {
   try {
     const { type } = req.params;
     const { date, month, year, from, to } = req.query;
-
+console.log('hit getSales report', req.query, type);
     let matchQuery = {};
 
     /* --------------------------------------------------
@@ -147,15 +147,16 @@ module.exports.getSalesReport = async (req, res) => {
        /reports/daily?date=YYYY-MM-DD
     -------------------------------------------------- */
     if (type === "daily") {
-      if (!date)
-        return res.status(400).json({ success: false, message: "Date is required" });
-
+      if (!date) return res.status(400).json({ success: false, message: "Date is required" });
       const start = new Date(date);
+      start.setUTCHours(0, 0, 0, 0);
       const end = new Date(date);
-      end.setDate(end.getDate() + 1);
-
-      matchQuery.date = { $gte: start, $lt: end };
+      end.setUTCHours(23, 59, 59, 999);
+      
+      console.log("daily sale", start, end);
+      matchQuery.date = { $gte: start, $lte: end };
     }
+
 
     /* --------------------------------------------------
        MONTHLY REPORT
@@ -450,11 +451,16 @@ module.exports.deleteSale = async (req, res) => {
     await session.startTransaction();
 
     // 1️⃣ Revert Inventory: Add products back to stock
-    // Assuming you have a function addToInventory that does the opposite of deductFromInventory
-    for (const item of existingSale.products || []) {
-      const result = await addToInventory(item, saleId);
-      console.log(result);
-      if (!result.success) throw new Error(`Revert inventory failed: ${result.message}`);
+     for (const item of existingSale.products) {
+      await inventoryCol.updateOne(
+        { product_id: new ObjectId(item.product_id) },
+        {
+          $inc: { stock_qty: item.qty },
+          $pull: { sale_history: { memo_id: existingSale._id } },
+          $set: { last_updated: new Date() }
+        },
+        { session }
+      );
     }
 
     // 2️⃣ Revert Payment: If customer paid money, refund the account balance
@@ -505,6 +511,7 @@ module.exports.deleteSale = async (req, res) => {
     // If anything fails, abort transaction to maintain data integrity
     await session.abortTransaction();
     console.error("Delete sale failed:", err.message);
+    console.log(err);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     await session.endSession();

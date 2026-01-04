@@ -108,6 +108,7 @@ async function decreaseInventoryStock({
    ✔ Creates inventory if missing
 ---------------------------------------- */
 async function addToInventory(product, invoiceId) {
+  console.log('received request to addToInventory for product', product, "invoice,", invoiceId);
   try {
     const pid = extractProductId(product.product_id);
 
@@ -229,9 +230,61 @@ async function pushSaleHistory({ product_id, memo_id, qty, price = 0, subtotal =
   }
 }
 
+async function recalculateAveragePurchasePrice(product_id, session = null) {
+  const productObjectId = new ObjectId(product_id);
+
+  const inventory = await inventoryCol.findOne(
+    { product_id: productObjectId },
+    session ? { session } : {}
+  );
+
+  // 🔁 CHANGE: handle empty purchase history
+  if (!inventory || !inventory.purchase_history?.length) {
+    await inventoryCol.updateOne(
+      { product_id: productObjectId },
+      {
+        $set: {
+          average_purchase_price: 0,
+          last_purchase_price: 0,
+          last_updated: new Date()
+        }
+      },
+      session ? { session } : {}
+    );
+    return;
+  }
+
+  let totalQty = 0;
+  let totalValue = 0;
+
+  for (const p of inventory.purchase_history) {
+    totalQty += p.qty;
+    totalValue += p.qty * p.purchase_price;
+  }
+
+  const avg = totalValue / totalQty;
+
+  await inventoryCol.updateOne(
+    { product_id: productObjectId },
+    {
+      $set: {
+        average_purchase_price: Number(avg.toFixed(4)),
+        last_purchase_price:
+          inventory.purchase_history[inventory.purchase_history.length - 1]
+            .purchase_price,
+        last_updated: new Date()
+      }
+    },
+    session ? { session } : {}
+  );
+}
+
+
+
 module.exports = {
   increaseInventoryStock,
   decreaseInventoryStock,
   addToInventory,
-  pushSaleHistory
+  pushSaleHistory,
+  recalculateAveragePurchasePrice
 };
