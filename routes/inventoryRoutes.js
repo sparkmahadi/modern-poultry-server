@@ -1,5 +1,5 @@
 const express = require("express");
-const { getInventory, updateInventory, deleteInventoryItem, getStockByProductId } = require("../controllers/inventory.controller");
+const { getInventory, updateInventory, deleteInventoryItem, getStockByProductId, getInventoryById } = require("../controllers/inventory.controller");
 
 const router = express.Router();
 
@@ -8,6 +8,8 @@ const router = express.Router();
 // GET /api/inventory?id=68e154c4a8b036cdc42a6de8
 // GET /api/inventory?search=daal
 router.get("/", getInventory);
+
+router.get("/:id", getInventoryById);
 
 // PUT /api/inventory/68e154c4a8b036cdc42a6de8
 // {
