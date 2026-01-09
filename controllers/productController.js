@@ -31,12 +31,13 @@ exports.getAllProducts = async (req, res) => {
 // @route   GET /api/utilities/products (all)
 // @access  Public
 exports.getProduct = async (req, res) => {
+    const { id } = req.params;
+    console.log('hit getproduct', id);
     try {
-        const { id } = req.params;
 
         if (id) {
             // Get a single product
-            const product = await productsCollection.findOne({ id: id });
+            const product = await productsCollection.findOne({ _id: new ObjectId(id) });
             if (!product) {
                 return res.status(404).json({ success: false, message: 'Product not found' });
             }

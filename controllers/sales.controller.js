@@ -168,7 +168,7 @@ console.log('hit getSales report', req.query, type);
 
       const start = new Date(year, month - 1, 1);
       const end = new Date(year, month, 1);
-
+      console.log("monthly sale", start, end);
       matchQuery.date = { $gte: start, $lt: end };
     }
 
@@ -182,6 +182,7 @@ console.log('hit getSales report', req.query, type);
 
       const start = new Date(year, 0, 1);
       const end = new Date(Number(year) + 1, 0, 1);
+            console.log("yearly sale", start, end);
 
       matchQuery.date = { $gte: start, $lt: end };
     }
@@ -402,6 +403,9 @@ module.exports.updateSaleById = async (req, res) => {
     /* --------------------------------------------------
        5️⃣ UPDATE SALE DOCUMENT
     -------------------------------------------------- */
+
+        const sellDate = date ? new Date(date) : new Date();
+
     await salesCol.updateOne(
       { _id: saleId },
       {
@@ -410,6 +414,7 @@ module.exports.updateSaleById = async (req, res) => {
           total_amount: newTotal,
           paid_amount: newPaid,
           due_amount: newDue,
+          date: sellDate,
           payment_method: payload.payment_method || existingSale.payment_method,
           account_id: payload.account_id ? new ObjectId(payload.account_id) : existingSale.account_id,
           updatedAt: new Date()
