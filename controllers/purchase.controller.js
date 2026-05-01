@@ -113,7 +113,7 @@ async function getPurchaseReport(req, res) {
       start.setUTCHours(0, 0, 0, 0);
       const end = new Date(date);
       end.setUTCHours(23, 59, 59, 999);
-      
+
       console.log("daily", start, end);
       matchQuery.date = { $gte: start, $lte: end };
     }
@@ -375,7 +375,7 @@ async function updatePurchase(req, res) {
     }
     // new inventory adjustment (avg pur price)
 
-      // 🔁 CHANGE: revert old purchase completely
+    // 🔁 CHANGE: revert old purchase completely
     for (const oldProd of existingPurchase.products) {
       await inventoryCol.updateOne(
         { product_id: new ObjectId(oldProd.product_id) },
@@ -725,21 +725,165 @@ async function paySupplierDue(req, res) {
 
 
 // -------------------- DELETE PURCHASE --------------------
+// async function deletePurchase(req, res) {
+//   const session = client.startSession();
+
+//   try {
+//     const purchaseId = new ObjectId(req.params.id);
+//     console.log(purchaseId);
+//     const existingPurchase = await purchasesCol.findOne({ _id: purchaseId });
+//     if (!existingPurchase) return res.status(404).json({ success: false, message: "Purchase not found" });
+
+//     await session.startTransaction();
+
+//     // 1️⃣ Revert inventory
+
+//     for (const item of existingPurchase.products) {
+//       await inventoryCol.updateOne(
+//         { product_id: new ObjectId(item.product_id) },
+//         {
+//           $inc: { stock_qty: -item.qty },
+//           $pull: {
+//             purchase_history: { invoice_id: purchaseId.toString() }
+//           }
+//         },
+//         { session }
+//       );
+
+//     // 🔁 CHANGE: mandatory avg recalculation
+//       await recalculateAveragePurchasePrice(item.product_id, session);
+//     }
+
+//     // 2️⃣ Revert payment if any
+//     if (existingPurchase.paid_amount > 0 && existingPurchase.account_id) {
+//       const revertResult = await updateAccountBalance({
+//         client,
+//         db,
+//         amount: existingPurchase.paid_amount,
+//         transactionType: "credit",
+//         entrySource: "purchase_delete",
+//         accountId: existingPurchase.account_id,
+//         details: { invoiceId: purchaseId, remarks: "Revert payment on delete" }
+//       });
+//       if (!revertResult.success) throw new Error(`Revert payment failed: ${revertResult.message}`);
+//     }
+
+//     // 3️⃣ Update supplier balances
+//     if (existingPurchase.supplier_id) {
+//       const supplierObjId = new ObjectId(existingPurchase.supplier_id);
+//       const balanceDiff = existingPurchase.total_amount - existingPurchase.paid_amount;
+//       const advanceDiff = existingPurchase.paid_amount > existingPurchase.total_amount ? existingPurchase.paid_amount - existingPurchase.total_amount : 0;
+//       const dueDiff = balanceDiff > 0 ? balanceDiff : 0;
+
+//       await suppliersCol.updateOne(
+//         { _id: supplierObjId },
+//         {
+//           $inc: { total_purchase: -existingPurchase.total_amount, total_due: -dueDiff, due: -dueDiff, advance: -advanceDiff },
+//           $set: { last_purchase_date: new Date() },
+//           $push: {
+//             supplier_history: {
+//               date: new Date(),
+//               type: "deleted_purchase",
+//               purchase_id: purchaseId,
+//               products: existingPurchase.products,
+//               total_amount: existingPurchase.total_amount,
+//               paid_amount: existingPurchase.paid_amount,
+//               due_after_payment: balanceDiff,
+//               remarks: "Purchase deleted"
+//             }
+//           }
+//         },
+//         { session }
+//       );
+//     }
+
+//     // 4️⃣ Delete purchase
+//     await purchasesCol.deleteOne({ _id: purchaseId }, { session });
+
+//     await session.commitTransaction();
+//     return res.status(200).json({ success: true, message: "Purchase deleted successfully" });
+
+//   } catch (err) {
+//     await session.abortTransaction();
+//     console.error("Delete purchase failed:", err.message);
+//     return res.status(500).json({ success: false, message: err.message });
+//   } finally {
+//     await session.endSession();
+//   }
+// }
+
+
 async function deletePurchase(req, res) {
   const session = client.startSession();
 
   try {
-    const purchaseId = new ObjectId(req.params.id);
+    console.log("🟢 DELETE PURCHASE HIT");
+    console.log("📥 Params ID:", req.params.id);
+
+    // 1️⃣ Validate purchaseId
+    let purchaseId;
+    try {
+      purchaseId = new ObjectId(req.params.id);
+      console.log("🆔 Converted purchaseId:", purchaseId);
+    } catch (e) {
+      console.log("❌ INVALID PURCHASE ID:", req.params.id);
+      throw new Error("Invalid purchase ID format");
+    }
+
+    // 2️⃣ Fetch purchase
+    console.log("🔍 Fetching purchase...");
     const existingPurchase = await purchasesCol.findOne({ _id: purchaseId });
-    if (!existingPurchase) return res.status(404).json({ success: false, message: "Purchase not found" });
+
+    console.log("📄 Purchase found:", existingPurchase ? "YES" : "NO");
+    console.log("📦 Products count:", existingPurchase?.products?.length);
+
+    if (!existingPurchase) {
+      console.log("❌ No purchase found in DB");
+      return res.status(404).json({ success: false, message: "Purchase not found" });
+    }
 
     await session.startTransaction();
+    console.log("🔓 Transaction started");
 
-    // 1️⃣ Revert inventory
+    // 3️⃣ Inventory rollback
+    console.log("🔁 Starting inventory rollback");
 
-    for (const item of existingPurchase.products) {
-      await inventoryCol.updateOne(
-        { product_id: new ObjectId(item.product_id) },
+    for (const [index, item] of existingPurchase.products.entries()) {
+      console.log(`\n➡️ ITEM ${index + 1}`);
+      console.log("Raw item:", item);
+
+      console.log("📦 item.product_id:", item.product_id);
+      console.log("📦 item.qty:", item.qty);
+
+      // ObjectId test
+      // let productObjId;
+      try {
+        const productIdStr = extractProductId(item.product_id);
+
+        if (!productIdStr) {
+          console.log("❌ Cannot extract product id:", item.product_id);
+          continue;
+        }
+
+        const productObjId = new ObjectId(productIdStr);
+
+        // productObjId = new ObjectId(item.product_id);
+        console.log("🆔 product ObjectId OK:", productObjId);
+      } catch (e) {
+        console.log("❌ INVALID product_id (NOT ObjectId):", item.product_id);
+      }
+
+      const productIdStr = extractProductId(item.product_id);
+
+      if (!productIdStr) {
+        console.log("❌ Skipping invalid product_id:", item.product_id);
+        continue;
+      }
+
+      const productObjId = new ObjectId(productIdStr);
+
+      const updateResult = await inventoryCol.updateOne(
+        { product_id: productObjId },
         {
           $inc: { stock_qty: -item.qty },
           $pull: {
@@ -748,13 +892,22 @@ async function deletePurchase(req, res) {
         },
         { session }
       );
-    
-    // 🔁 CHANGE: mandatory avg recalculation
+
+      console.log("📊 Inventory update result:", updateResult);
+
+      // avg recalculation debug
+      console.log("🔄 Calling avg recalculation for:", item.product_id);
       await recalculateAveragePurchasePrice(item.product_id, session);
+      console.log("✅ Avg recalculation done");
     }
 
-    // 2️⃣ Revert payment if any
+    // 4️⃣ Payment rollback
+    console.log("💰 Paid amount:", existingPurchase.paid_amount);
+    console.log("🏦 Account ID:", existingPurchase.account_id);
+
     if (existingPurchase.paid_amount > 0 && existingPurchase.account_id) {
+      console.log("🔁 Reverting payment...");
+
       const revertResult = await updateAccountBalance({
         client,
         db,
@@ -764,20 +917,37 @@ async function deletePurchase(req, res) {
         accountId: existingPurchase.account_id,
         details: { invoiceId: purchaseId, remarks: "Revert payment on delete" }
       });
-      if (!revertResult.success) throw new Error(`Revert payment failed: ${revertResult.message}`);
+
+      console.log("💳 Payment revert result:", revertResult);
+
+      if (!revertResult.success) throw new Error(revertResult.message);
     }
 
-    // 3️⃣ Update supplier balances
+    // 5️⃣ Supplier update
+    console.log("🏭 Supplier ID:", existingPurchase.supplier_id);
+
     if (existingPurchase.supplier_id) {
       const supplierObjId = new ObjectId(existingPurchase.supplier_id);
+
       const balanceDiff = existingPurchase.total_amount - existingPurchase.paid_amount;
-      const advanceDiff = existingPurchase.paid_amount > existingPurchase.total_amount ? existingPurchase.paid_amount - existingPurchase.total_amount : 0;
+      const advanceDiff = existingPurchase.paid_amount > existingPurchase.total_amount
+        ? existingPurchase.paid_amount - existingPurchase.total_amount
+        : 0;
       const dueDiff = balanceDiff > 0 ? balanceDiff : 0;
 
-      await suppliersCol.updateOne(
+      console.log("📊 balanceDiff:", balanceDiff);
+      console.log("📊 dueDiff:", dueDiff);
+      console.log("📊 advanceDiff:", advanceDiff);
+
+      const supplierUpdate = await suppliersCol.updateOne(
         { _id: supplierObjId },
         {
-          $inc: { total_purchase: -existingPurchase.total_amount, total_due: -dueDiff, due: -dueDiff, advance: -advanceDiff },
+          $inc: {
+            total_purchase: -existingPurchase.total_amount,
+            total_due: -dueDiff,
+            due: -dueDiff,
+            advance: -advanceDiff
+          },
           $set: { last_purchase_date: new Date() },
           $push: {
             supplier_history: {
@@ -794,22 +964,43 @@ async function deletePurchase(req, res) {
         },
         { session }
       );
+
+      console.log("🏭 Supplier update result:", supplierUpdate);
     }
 
-    // 4️⃣ Delete purchase
-    await purchasesCol.deleteOne({ _id: purchaseId }, { session });
+    // 6️⃣ Delete purchase
+    console.log("🗑️ Deleting purchase...");
+
+    const deleteResult = await purchasesCol.deleteOne(
+      { _id: purchaseId },
+      { session }
+    );
+
+    console.log("🗑️ Delete result:", deleteResult);
 
     await session.commitTransaction();
-    return res.status(200).json({ success: true, message: "Purchase deleted successfully" });
+    console.log("✅ Transaction committed");
+
+    return res.status(200).json({
+      success: true,
+      message: "Purchase deleted successfully"
+    });
 
   } catch (err) {
+    console.log("❌ ERROR OCCURRED");
+    console.log("Message:", err.message);
+    console.log("Stack:", err.stack);
+
     await session.abortTransaction();
-    console.error("Delete purchase failed:", err.message);
     return res.status(500).json({ success: false, message: err.message });
+
   } finally {
     await session.endSession();
+    console.log("🔚 Session ended");
   }
 }
+
+
 
 async function paySupplierDueManually(req, res) {
   const session = client.startSession();

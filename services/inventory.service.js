@@ -231,7 +231,16 @@ async function pushSaleHistory({ product_id, memo_id, qty, price = 0, subtotal =
 }
 
 async function recalculateAveragePurchasePrice(product_id, session = null) {
-  const productObjectId = new ObjectId(product_id);
+  // const productObjectId = new ObjectId(product_id);
+
+  const productIdStr = extractProductId(product_id);
+
+  if (!productIdStr) {
+    console.log("❌ Invalid product_id passed:", product_id);
+    return;
+  }
+
+  const productObjectId = new ObjectId(productIdStr);
 
   const inventory = await inventoryCol.findOne(
     { product_id: productObjectId },
