@@ -2,7 +2,7 @@ const { ObjectId } = require("mongodb");
 const { client, db } = require("../db.js");
 const { updateAccountBalance } = require("../services/accountBalance.service.js");
 const { increaseInventoryStock, decreaseInventoryStock, addToInventory, recalculateAveragePurchasePrice } = require("../services/inventory.service.js");
-const { extractProductId } = require("../utils/id.util.js");
+const { extractProductId, normalizeIdV2 } = require("../utils/id.util.js");
 
 const purchasesCol = db.collection("purchases");
 const inventoryCol = db.collection("inventory");
@@ -346,39 +346,341 @@ async function createPurchase(req, res) {
  * 4. Supports payment method / account change
  * 5. Runs everything inside a MongoDB transaction
  */
+// async function updatePurchase(req, res) {
+//   const session = client.startSession();
+
+//   try {
+//     const purchaseId = new ObjectId(req.params.id);
+//     const payload = req.body;
+//     // console.log("payload", payload);
+//     // return res.status(404).json({ success: false, message: "Purchase not found" });
+//     console.log("➡️ Update purchase called:", purchaseId.toString());
+//     console.log("📦 Incoming payload products:", payload.products);
+//     await session.startTransaction();
+//     console.log("✅ Transaction started");
+
+//     /* --------------------------------------------------
+//        1️⃣ FETCH EXISTING PURCHASE
+//     -------------------------------------------------- */
+//     const existingPurchase = await purchasesCol.findOne(
+//       { _id: purchaseId },
+//       { session }
+//     );
+
+//     console.log("📄 Existing purchase:", existingPurchase);
+
+//     if (!existingPurchase) {
+//       console.log("❌ Purchase not found");
+//       return res.status(404).json({ success: false, message: "Purchase not found" });
+//     }
+//     // new inventory adjustment (avg pur price)
+
+//     // 🔁 CHANGE: revert old purchase completely
+//     for (const oldProd of existingPurchase.products) {
+//       await inventoryCol.updateOne(
+//         { product_id: new ObjectId(oldProd.product_id) },
+//         {
+//           $inc: { stock_qty: -oldProd.qty },
+//           $pull: {
+//             purchase_history: { invoice_id: purchaseId.toString() }
+//           }
+//         },
+//         { session }
+//       );
+
+//       // 🔁 CHANGE: recalc after removal
+//       await recalculateAveragePurchasePrice(oldProd.product_id, session);
+//     }
+
+//     // 🔁 CHANGE: apply updated purchase
+//     const newProducts = payload.products;
+//     for (const newProd of newProducts) {
+//       const purchaseRecord = {
+//         invoice_id: purchaseId.toString(),
+//         qty: newProd.qty,
+//         purchase_price: newProd.purchase_price,
+//         subtotal: newProd.subtotal,
+//         date: new Date()
+//       };
+
+//       await inventoryCol.updateOne(
+//         { product_id: new ObjectId(newProd.product_id) },
+//         {
+//           $inc: { stock_qty: newProd.qty },
+//           $push: { purchase_history: purchaseRecord }
+//         },
+//         { upsert: true, session }
+//       );
+
+//       // 🔁 CHANGE: recalc after add
+//       await recalculateAveragePurchasePrice(newProd.product_id, session);
+//     }
+
+//     /* --------------------------------------------------
+//    2️⃣ INVENTORY ADJUSTMENT (USING SERVICES)
+// -------------------------------------------------- */
+
+//     // const oldMap = new Map();
+//     // existingPurchase.products.forEach(p => {
+//     //   oldMap.set(p.product_id.toString(), p);
+//     // });
+
+//     // const newMap = new Map();
+//     // payload.products.forEach(p => {
+//     //   newMap.set(p.product_id.toString(), p);
+//     // });
+
+//     // /* -------------------------------
+//     //    Added or updated products
+//     // -------------------------------- */
+//     // for (const [productId, newProd] of newMap) {
+//     //   const oldProd = oldMap.get(productId);
+
+//     //   if (!oldProd) {
+//     //     // ➕ Newly added product
+//     //     const inc = await increaseInventoryStock({
+//     //       product_id: productId,
+//     //       qty: newProd.qty
+//     //     });
+
+//     //     if (!inc.success) throw new Error(inc.message);
+
+//     //   } else {
+//     //     const diff = newProd.qty - oldProd.qty;
+
+//     //     if (diff > 0) {
+//     //       const inc = await increaseInventoryStock({
+//     //         product_id: productId,
+//     //         qty: diff
+//     //       });
+//     //       if (!inc.success) throw new Error(inc.message);
+
+//     //     } else if (diff < 0) {
+//     //       const dec = await decreaseInventoryStock({
+//     //         product_id: productId,
+//     //         qty: Math.abs(diff)
+//     //       });
+//     //       if (!dec.success) throw new Error(dec.message);
+//     //     }
+//     //   }
+//     // }
+
+//     // /* -------------------------------
+//     //    Removed products
+//     // -------------------------------- */
+//     // for (const [productId, oldProd] of oldMap) {
+//     //   if (!newMap.has(productId)) {
+//     //     const dec = await decreaseInventoryStock({
+//     //       product_id: productId,
+//     //       qty: oldProd.qty
+//     //     });
+//     //     if (!dec.success) throw new Error(dec.message);
+//     //   }
+//     // }
+
+
+
+//     /* --------------------------------------------------
+//        3️⃣ ACCOUNT BALANCE ADJUSTMENT
+//     -------------------------------------------------- */
+//     const oldPaid = existingPurchase.paid_amount || 0;
+//     const newPaid = payload.paid_amount || 0;
+
+//     console.log("💰 Old paid:", oldPaid);
+//     console.log("💰 New paid:", newPaid);
+
+//     if (oldPaid > 0 && existingPurchase.account_id) {
+//       console.log("🔄 Reverting old payment");
+
+//       await updateAccountBalance({
+//         client,
+//         db,
+//         amount: oldPaid,
+//         transactionType: "credit",
+//         entrySource: "purchase_update",
+//         accountId: existingPurchase.account_id.toString(),
+//         details: existingPurchase
+//       });
+//     }
+
+//     if (newPaid > 0 && payload.account_id) {
+//       console.log("💸 Applying new payment");
+
+//       await updateAccountBalance({
+//         client,
+//         db,
+//         amount: newPaid,
+//         transactionType: "debit",
+//         entrySource: "purchase_update",
+//         accountId: payload.account_id,
+//         details: payload
+//       });
+//     }
+
+//     /* --------------------------------------------------
+//        4️⃣ SUPPLIER DUE ADJUSTMENT
+//     -------------------------------------------------- */
+//     const suppliersCol = db.collection("suppliers");
+
+//     const oldTotal = existingPurchase.total_amount;
+//     const newTotal = payload.total_amount;
+
+//     const oldDue = oldTotal - oldPaid;
+//     const newDue = newTotal - newPaid;
+
+//     const dueDiff = newDue - oldDue;
+//     const purchaseDiff = newTotal - oldTotal;
+
+//     console.log("🏭 Supplier due diff:", dueDiff);
+//     console.log("🏭 Supplier purchase diff:", purchaseDiff);
+
+//     await suppliersCol.updateOne(
+//       { _id: new ObjectId(payload.supplier_id) },
+//       {
+//         $inc: {
+//           due: dueDiff,
+//           total_due: dueDiff,
+//           total_purchase: purchaseDiff
+//         },
+//         $set: {
+//           last_purchase_date: new Date(),
+//           updatedAt: new Date()
+//         }
+//       },
+//       { session }
+//     );
+
+//     /* --------------------------------------------------
+//        5️⃣ UPDATE SUPPLIER HISTORY ENTRY
+//     -------------------------------------------------- */
+//     console.log("📝 Updating supplier history");
+
+//     await suppliersCol.updateOne(
+//       {
+//         _id: new ObjectId(payload.supplier_id),
+//         "supplier_history.purchase_id": purchaseId
+//       },
+//       {
+//         $set: {
+//           "supplier_history.$.products": payload.products,
+//           "supplier_history.$.total_amount": newTotal,
+//           "supplier_history.$.paid_amount": newPaid,
+//           "supplier_history.$.due_after_payment": newDue,
+//           "supplier_history.$.date": new Date(),
+//           "supplier_history.$.remarks": "Purchase updated"
+//         }
+//       },
+//       { session }
+//     );
+
+//     /* --------------------------------------------------
+//        6️⃣ UPDATE PURCHASE DOCUMENT
+//     -------------------------------------------------- */
+
+//     // Parse date properly
+//     let purchaseDate;
+//     if (payload.date) {
+//       purchaseDate = new Date(payload.date);
+//       if (isNaN(purchaseDate.getTime())) {
+//         return res.status(400).json({ success: false, message: "Invalid date format" });
+//       }
+//     } else {
+//       purchaseDate = new Date(); // default to current date and time
+//     }
+
+
+//     console.log("📄 Updating purchase document");
+
+//     //     await purchasesCol.updateOne(
+//     //   { _id: new ObjectId(purchaseId) },
+//     //   { $set: req.body },
+//     //   { session }
+//     // );
+
+//     await purchasesCol.updateOne(
+//       { _id: purchaseId },
+//       {
+//         $set: {
+//           products: payload.products,
+//           total_amount: newTotal,
+//           paid_amount: newPaid,
+//           payment_due: newDue,
+//           payment_method: payload.payment_method,
+//           account_id: payload.account_id ? new ObjectId(payload.account_id) : null,
+//           last_payment_date: new Date(),
+//           updated_at: new Date(),
+//           date: purchaseDate,
+//         }
+//       },
+//       { session }
+//     );
+
+//     await session.commitTransaction();
+//     console.log("✅ Transaction committed");
+
+//     res.status(200).json({
+//       success: true,
+//       message: "Purchase updated successfully"
+//     });
+
+//   } catch (error) {
+//     await session.abortTransaction();
+//     console.error("❌ Purchase update failed:", error);
+//     res.status(500).json({ success: false, message: error.message });
+//   } finally {
+//     session.endSession();
+//     console.log("🧹 Session ended");
+//   }
+// }
+
+
 async function updatePurchase(req, res) {
   const session = client.startSession();
 
   try {
-    const purchaseId = new ObjectId(req.params.id);
+    console.log("====================================");
+    console.log("🚀 UPDATE PURCHASE START");
+    console.log("====================================");
+
+    console.log("📥 Params ID:", req.params.id);
+    console.log("📥 Payload:", JSON.stringify(req.body, null, 2));
+
+    const purchaseId = normalizeIdV2(req.params.id, "purchaseId");
     const payload = req.body;
-    // console.log("payload", payload);
-    // return res.status(404).json({ success: false, message: "Purchase not found" });
-    console.log("➡️ Update purchase called:", purchaseId.toString());
-    console.log("📦 Incoming payload products:", payload.products);
+
     await session.startTransaction();
     console.log("✅ Transaction started");
 
-    /* --------------------------------------------------
-       1️⃣ FETCH EXISTING PURCHASE
-    -------------------------------------------------- */
+    /* -------------------------------------------------- */
+    /* 1️⃣ FETCH EXISTING PURCHASE */
+    /* -------------------------------------------------- */
+
     const existingPurchase = await purchasesCol.findOne(
       { _id: purchaseId },
       { session }
     );
 
-    console.log("📄 Existing purchase:", existingPurchase);
+    console.log("📄 Existing Purchase Found:", !!existingPurchase);
 
     if (!existingPurchase) {
-      console.log("❌ Purchase not found");
-      return res.status(404).json({ success: false, message: "Purchase not found" });
+      await session.abortTransaction();
+      return res.status(404).json({
+        success: false,
+        message: "Purchase not found"
+      });
     }
-    // new inventory adjustment (avg pur price)
 
-    // 🔁 CHANGE: revert old purchase completely
+    /* -------------------------------------------------- */
+    /* 2️⃣ REVERT OLD INVENTORY */
+    /* -------------------------------------------------- */
+
     for (const oldProd of existingPurchase.products) {
+      console.log("🔄 Reverting product:", oldProd);
+
+      const productId = normalizeIdV2(oldProd.product_id, "old product_id");
+
       await inventoryCol.updateOne(
-        { product_id: new ObjectId(oldProd.product_id) },
+        { product_id: productId },
         {
           $inc: { stock_qty: -oldProd.qty },
           $pull: {
@@ -388,13 +690,22 @@ async function updatePurchase(req, res) {
         { session }
       );
 
-      // 🔁 CHANGE: recalc after removal
-      await recalculateAveragePurchasePrice(oldProd.product_id, session);
+      await recalculateAveragePurchasePrice(productId, session);
     }
 
-    // 🔁 CHANGE: apply updated purchase
-    const newProducts = payload.products;
-    for (const newProd of newProducts) {
+    /* -------------------------------------------------- */
+    /* 3️⃣ APPLY NEW INVENTORY */
+    /* -------------------------------------------------- */
+
+    if (!Array.isArray(payload.products) || payload.products.length === 0) {
+      throw new Error("Products array is empty or invalid");
+    }
+
+    for (const newProd of payload.products) {
+      console.log("➕ Applying product:", newProd);
+
+      const productId = normalizeIdV2(newProd.product_id, "new product_id");
+
       const purchaseRecord = {
         invoice_id: purchaseId.toString(),
         qty: newProd.qty,
@@ -404,7 +715,7 @@ async function updatePurchase(req, res) {
       };
 
       await inventoryCol.updateOne(
-        { product_id: new ObjectId(newProd.product_id) },
+        { product_id: productId },
         {
           $inc: { stock_qty: newProd.qty },
           $push: { purchase_history: purchaseRecord }
@@ -412,82 +723,15 @@ async function updatePurchase(req, res) {
         { upsert: true, session }
       );
 
-      // 🔁 CHANGE: recalc after add
-      await recalculateAveragePurchasePrice(newProd.product_id, session);
+      await recalculateAveragePurchasePrice(productId, session);
     }
 
-    /* --------------------------------------------------
-   2️⃣ INVENTORY ADJUSTMENT (USING SERVICES)
--------------------------------------------------- */
+    /* -------------------------------------------------- */
+    /* 4️⃣ ACCOUNT BALANCE */
+    /* -------------------------------------------------- */
 
-    // const oldMap = new Map();
-    // existingPurchase.products.forEach(p => {
-    //   oldMap.set(p.product_id.toString(), p);
-    // });
-
-    // const newMap = new Map();
-    // payload.products.forEach(p => {
-    //   newMap.set(p.product_id.toString(), p);
-    // });
-
-    // /* -------------------------------
-    //    Added or updated products
-    // -------------------------------- */
-    // for (const [productId, newProd] of newMap) {
-    //   const oldProd = oldMap.get(productId);
-
-    //   if (!oldProd) {
-    //     // ➕ Newly added product
-    //     const inc = await increaseInventoryStock({
-    //       product_id: productId,
-    //       qty: newProd.qty
-    //     });
-
-    //     if (!inc.success) throw new Error(inc.message);
-
-    //   } else {
-    //     const diff = newProd.qty - oldProd.qty;
-
-    //     if (diff > 0) {
-    //       const inc = await increaseInventoryStock({
-    //         product_id: productId,
-    //         qty: diff
-    //       });
-    //       if (!inc.success) throw new Error(inc.message);
-
-    //     } else if (diff < 0) {
-    //       const dec = await decreaseInventoryStock({
-    //         product_id: productId,
-    //         qty: Math.abs(diff)
-    //       });
-    //       if (!dec.success) throw new Error(dec.message);
-    //     }
-    //   }
-    // }
-
-    // /* -------------------------------
-    //    Removed products
-    // -------------------------------- */
-    // for (const [productId, oldProd] of oldMap) {
-    //   if (!newMap.has(productId)) {
-    //     const dec = await decreaseInventoryStock({
-    //       product_id: productId,
-    //       qty: oldProd.qty
-    //     });
-    //     if (!dec.success) throw new Error(dec.message);
-    //   }
-    // }
-
-
-
-    /* --------------------------------------------------
-       3️⃣ ACCOUNT BALANCE ADJUSTMENT
-    -------------------------------------------------- */
     const oldPaid = existingPurchase.paid_amount || 0;
     const newPaid = payload.paid_amount || 0;
-
-    console.log("💰 Old paid:", oldPaid);
-    console.log("💰 New paid:", newPaid);
 
     if (oldPaid > 0 && existingPurchase.account_id) {
       console.log("🔄 Reverting old payment");
@@ -506,21 +750,25 @@ async function updatePurchase(req, res) {
     if (newPaid > 0 && payload.account_id) {
       console.log("💸 Applying new payment");
 
+      const accountId = normalizeIdV2(payload.account_id, "account_id");
+
       await updateAccountBalance({
         client,
         db,
         amount: newPaid,
         transactionType: "debit",
         entrySource: "purchase_update",
-        accountId: payload.account_id,
+        accountId: accountId.toString(),
         details: payload
       });
     }
 
-    /* --------------------------------------------------
-       4️⃣ SUPPLIER DUE ADJUSTMENT
-    -------------------------------------------------- */
+    /* -------------------------------------------------- */
+    /* 5️⃣ SUPPLIER UPDATE */
+    /* -------------------------------------------------- */
+
     const suppliersCol = db.collection("suppliers");
+    const supplierId = normalizeIdV2(payload.supplier_id, "supplier_id");
 
     const oldTotal = existingPurchase.total_amount;
     const newTotal = payload.total_amount;
@@ -531,11 +779,8 @@ async function updatePurchase(req, res) {
     const dueDiff = newDue - oldDue;
     const purchaseDiff = newTotal - oldTotal;
 
-    console.log("🏭 Supplier due diff:", dueDiff);
-    console.log("🏭 Supplier purchase diff:", purchaseDiff);
-
     await suppliersCol.updateOne(
-      { _id: new ObjectId(payload.supplier_id) },
+      { _id: supplierId },
       {
         $inc: {
           due: dueDiff,
@@ -550,14 +795,13 @@ async function updatePurchase(req, res) {
       { session }
     );
 
-    /* --------------------------------------------------
-       5️⃣ UPDATE SUPPLIER HISTORY ENTRY
-    -------------------------------------------------- */
-    console.log("📝 Updating supplier history");
+    /* -------------------------------------------------- */
+    /* 6️⃣ SUPPLIER HISTORY */
+    /* -------------------------------------------------- */
 
     await suppliersCol.updateOne(
       {
-        _id: new ObjectId(payload.supplier_id),
+        _id: supplierId,
         "supplier_history.purchase_id": purchaseId
       },
       {
@@ -573,29 +817,18 @@ async function updatePurchase(req, res) {
       { session }
     );
 
-    /* --------------------------------------------------
-       6️⃣ UPDATE PURCHASE DOCUMENT
-    -------------------------------------------------- */
+    /* -------------------------------------------------- */
+    /* 7️⃣ UPDATE PURCHASE DOCUMENT */
+    /* -------------------------------------------------- */
 
-    // Parse date properly
-    let purchaseDate;
+    let purchaseDate = new Date();
     if (payload.date) {
-      purchaseDate = new Date(payload.date);
-      if (isNaN(purchaseDate.getTime())) {
-        return res.status(400).json({ success: false, message: "Invalid date format" });
+      const parsedDate = new Date(payload.date);
+      if (isNaN(parsedDate.getTime())) {
+        throw new Error("Invalid date format");
       }
-    } else {
-      purchaseDate = new Date(); // default to current date and time
+      purchaseDate = parsedDate;
     }
-
-
-    console.log("📄 Updating purchase document");
-
-    //     await purchasesCol.updateOne(
-    //   { _id: new ObjectId(purchaseId) },
-    //   { $set: req.body },
-    //   { session }
-    // );
 
     await purchasesCol.updateOne(
       { _id: purchaseId },
@@ -606,7 +839,9 @@ async function updatePurchase(req, res) {
           paid_amount: newPaid,
           payment_due: newDue,
           payment_method: payload.payment_method,
-          account_id: payload.account_id ? new ObjectId(payload.account_id) : null,
+          account_id: payload.account_id
+            ? normalizeIdV2(payload.account_id, "account_id")
+            : null,
           last_payment_date: new Date(),
           updated_at: new Date(),
           date: purchaseDate,
@@ -615,8 +850,11 @@ async function updatePurchase(req, res) {
       { session }
     );
 
+    /* -------------------------------------------------- */
+    /* ✅ COMMIT */
+    /* -------------------------------------------------- */
+
     await session.commitTransaction();
-    console.log("✅ Transaction committed");
 
     res.status(200).json({
       success: true,
@@ -624,11 +862,16 @@ async function updatePurchase(req, res) {
     });
 
   } catch (error) {
+    console.error("❌ ERROR:", error.message);
     await session.abortTransaction();
-    console.error("❌ Purchase update failed:", error);
-    res.status(500).json({ success: false, message: error.message });
+
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+
   } finally {
-    session.endSession();
+    await session.endSession();
     console.log("🧹 Session ended");
   }
 }
@@ -722,95 +965,6 @@ async function paySupplierDue(req, res) {
     return res.status(500).json({ success: false, message: err.message });
   }
 }
-
-
-// -------------------- DELETE PURCHASE --------------------
-// async function deletePurchase(req, res) {
-//   const session = client.startSession();
-
-//   try {
-//     const purchaseId = new ObjectId(req.params.id);
-//     console.log(purchaseId);
-//     const existingPurchase = await purchasesCol.findOne({ _id: purchaseId });
-//     if (!existingPurchase) return res.status(404).json({ success: false, message: "Purchase not found" });
-
-//     await session.startTransaction();
-
-//     // 1️⃣ Revert inventory
-
-//     for (const item of existingPurchase.products) {
-//       await inventoryCol.updateOne(
-//         { product_id: new ObjectId(item.product_id) },
-//         {
-//           $inc: { stock_qty: -item.qty },
-//           $pull: {
-//             purchase_history: { invoice_id: purchaseId.toString() }
-//           }
-//         },
-//         { session }
-//       );
-
-//     // 🔁 CHANGE: mandatory avg recalculation
-//       await recalculateAveragePurchasePrice(item.product_id, session);
-//     }
-
-//     // 2️⃣ Revert payment if any
-//     if (existingPurchase.paid_amount > 0 && existingPurchase.account_id) {
-//       const revertResult = await updateAccountBalance({
-//         client,
-//         db,
-//         amount: existingPurchase.paid_amount,
-//         transactionType: "credit",
-//         entrySource: "purchase_delete",
-//         accountId: existingPurchase.account_id,
-//         details: { invoiceId: purchaseId, remarks: "Revert payment on delete" }
-//       });
-//       if (!revertResult.success) throw new Error(`Revert payment failed: ${revertResult.message}`);
-//     }
-
-//     // 3️⃣ Update supplier balances
-//     if (existingPurchase.supplier_id) {
-//       const supplierObjId = new ObjectId(existingPurchase.supplier_id);
-//       const balanceDiff = existingPurchase.total_amount - existingPurchase.paid_amount;
-//       const advanceDiff = existingPurchase.paid_amount > existingPurchase.total_amount ? existingPurchase.paid_amount - existingPurchase.total_amount : 0;
-//       const dueDiff = balanceDiff > 0 ? balanceDiff : 0;
-
-//       await suppliersCol.updateOne(
-//         { _id: supplierObjId },
-//         {
-//           $inc: { total_purchase: -existingPurchase.total_amount, total_due: -dueDiff, due: -dueDiff, advance: -advanceDiff },
-//           $set: { last_purchase_date: new Date() },
-//           $push: {
-//             supplier_history: {
-//               date: new Date(),
-//               type: "deleted_purchase",
-//               purchase_id: purchaseId,
-//               products: existingPurchase.products,
-//               total_amount: existingPurchase.total_amount,
-//               paid_amount: existingPurchase.paid_amount,
-//               due_after_payment: balanceDiff,
-//               remarks: "Purchase deleted"
-//             }
-//           }
-//         },
-//         { session }
-//       );
-//     }
-
-//     // 4️⃣ Delete purchase
-//     await purchasesCol.deleteOne({ _id: purchaseId }, { session });
-
-//     await session.commitTransaction();
-//     return res.status(200).json({ success: true, message: "Purchase deleted successfully" });
-
-//   } catch (err) {
-//     await session.abortTransaction();
-//     console.error("Delete purchase failed:", err.message);
-//     return res.status(500).json({ success: false, message: err.message });
-//   } finally {
-//     await session.endSession();
-//   }
-// }
 
 
 async function deletePurchase(req, res) {

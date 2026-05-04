@@ -44,4 +44,30 @@ function normalizeId(value, { asObjectId = false } = {}) {
 }
 
 
-module.exports = { extractProductId, normalizeId };
+const normalizeIdV2 = (value, label = "id") => {
+  if (!value) {
+    throw new Error(`Missing ${label}`);
+  }
+
+  let id = value;
+
+  // Handle { $oid }
+  if (typeof id === "object" && id !== null && id.$oid) {
+    id = id.$oid;
+  }
+
+  // Already ObjectId
+  if (id instanceof ObjectId) {
+    return id;
+  }
+
+  // String → validate
+  if (typeof id === "string" && ObjectId.isValid(id)) {
+    return new ObjectId(id);
+  }
+
+  console.error(`❌ Invalid ObjectId for ${label}:`, value);
+  throw new Error(`Invalid ${label}`);
+};
+
+module.exports = { extractProductId, normalizeId, normalizeIdV2 };
