@@ -5,6 +5,7 @@ const { increaseInventoryStock, decreaseInventoryStock, addToInventory, recalcul
 const { extractProductId, normalizeIdV2 } = require("../utils/id.util.js");
 
 const purchasesCol = db.collection("purchases");
+const productsCol = db.collection("products");
 const inventoryCol = db.collection("inventory");
 const suppliersCol = db.collection("suppliers");
 
@@ -877,6 +878,280 @@ async function updatePurchase(req, res) {
 }
 
 
+/**
+ * =====================================================
+ * UPDATE ALL PRODUCT PURCHASE PRICES
+ * =====================================================
+ *
+ * Purpose:
+ * - Sync all product purchase prices
+ * - Read average_purchase_price from inventory
+ * - Update products collection
+ *
+ * Trigger:
+ * Frontend button:
+ * "Update All Product Prices"
+ *
+ * API Example:
+ * PATCH /api/products/update-all-prices
+ *
+ * =====================================================
+ */
+
+async function updateAllProductPrices(
+  req,
+  res
+) {
+  const session =
+    client.startSession();
+
+  try {
+    console.log("====================================");
+    console.log(
+      "🚀 UPDATE ALL PRODUCT PRICES START"
+    );
+    console.log("====================================");
+
+    /* ---------------------------------- */
+    /* 1️⃣ START TRANSACTION */
+    /* ---------------------------------- */
+
+    await session.startTransaction();
+
+    console.log(
+      "✅ Transaction Started"
+    );
+
+    /* ---------------------------------- */
+    /* 3️⃣ GET ALL PRODUCTS */
+    /* ---------------------------------- */
+
+    const products =
+      await productsCol
+        .find({}, { session })
+        .toArray();
+
+    console.log(
+      `📦 Total Products Found: ${products.length}`
+    );
+
+    if (!products.length) {
+      await session.abortTransaction();
+
+      return res.status(404).json({
+        success: false,
+        message:
+          "No products found",
+      });
+    }
+
+    /* ---------------------------------- */
+    /* 4️⃣ GET ALL INVENTORY DATA */
+    /* ---------------------------------- */
+    /**
+     * We fetch inventory once
+     * for better performance
+     */
+
+    const inventories =
+      await inventoryCol
+        .find({}, { session })
+        .toArray();
+
+    console.log(
+      `📊 Total Inventory Found: ${inventories.length}`
+    );
+
+    /* ---------------------------------- */
+    /* 5️⃣ CREATE INVENTORY MAP */
+    /* ---------------------------------- */
+    /**
+     * Convert inventory array
+     * into fast lookup object
+     *
+     * Key:
+     * product_id
+     */
+
+    const inventoryMap =
+      new Map();
+
+    for (const inv of inventories) {
+      inventoryMap.set(
+        inv.product_id.toString(),
+        inv
+      );
+    }
+
+    /* ---------------------------------- */
+    /* 6️⃣ PREPARE BULK UPDATE */
+    /* ---------------------------------- */
+
+    const bulkUpdates = [];
+
+    let updatedCount = 0;
+    let skippedCount = 0;
+
+    for (const product of products) {
+      const productId =
+        product._id.toString();
+
+      /* ---------------------------------- */
+      /* FIND MATCHING INVENTORY */
+      /* ---------------------------------- */
+
+      const inventory =
+        inventoryMap.get(
+          productId
+        );
+
+      if (!inventory) {
+        console.log(
+          `⚠️ Inventory not found for Product: ${product.item_name}`
+        );
+
+        skippedCount++;
+
+        continue;
+      }
+
+      /* ---------------------------------- */
+      /* GET PRICES */
+      /* ---------------------------------- */
+
+      const averagePurchasePrice =
+        Number(
+          inventory.average_purchase_price ||
+            0
+        );
+
+      const lastPurchasePrice =
+        Number(
+          inventory.last_purchase_price ||
+            0
+        );
+
+      console.log(
+        `💰 Updating: ${product.item_name}`
+      );
+
+      console.log(
+        `Average Price: ${averagePurchasePrice}`
+      );
+
+      /* ---------------------------------- */
+      /* BULK UPDATE OBJECT */
+      /* ---------------------------------- */
+
+      bulkUpdates.push({
+        updateOne: {
+          filter: {
+            _id: product._id,
+          },
+
+          update: {
+            $set: {
+              /**
+               * Main purchase price
+               */
+              price:
+                averagePurchasePrice,
+
+              last_purchase_price:
+                lastPurchasePrice,
+
+              /**
+               * Last update time
+               */
+              updated_at:
+                new Date(),
+            },
+          },
+        },
+      });
+
+      updatedCount++;
+    }
+
+    /* ---------------------------------- */
+    /* 7️⃣ EXECUTE BULK UPDATE */
+    /* ---------------------------------- */
+
+    if (bulkUpdates.length > 0) {
+      const bulkResult =
+        await productsCol.bulkWrite(
+          bulkUpdates,
+          { session }
+        );
+
+      console.log(
+        "✅ Bulk Update Done"
+      );
+
+      console.log(
+        "Modified Count:",
+        bulkResult.modifiedCount
+      );
+    }
+
+    /* ---------------------------------- */
+    /* 8️⃣ COMMIT TRANSACTION */
+    /* ---------------------------------- */
+
+    await session.commitTransaction();
+
+    console.log(
+      "✅ Transaction Committed"
+    );
+
+    console.log("====================================");
+    console.log(
+      "✅ UPDATE ALL PRODUCT PRICES END"
+    );
+    console.log("====================================");
+
+    /* ---------------------------------- */
+    /* 9️⃣ RESPONSE */
+    /* ---------------------------------- */
+
+    res.status(200).json({
+      success: true,
+      message:
+        "All product prices updated successfully",
+
+      summary: {
+        total_products:
+          products.length,
+
+        updated:
+          updatedCount,
+
+        skipped:
+          skippedCount,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "❌ ERROR:",
+      error.message
+    );
+
+    await session.abortTransaction();
+
+    res.status(500).json({
+      success: false,
+      message:
+        error.message,
+    });
+  } finally {
+    await session.endSession();
+
+    console.log(
+      "🧹 Session Ended"
+    );
+  }
+}
+
 
 
 /* ======================
@@ -1338,5 +1613,6 @@ module.exports = {
   paySupplierDue,
   getPurchaseReport,
   paySupplierDueManually,
-  getPurchasesBySupplierId
+  getPurchasesBySupplierId,
+  updateAllProductPrices
 };
