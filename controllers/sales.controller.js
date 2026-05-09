@@ -111,7 +111,7 @@ module.exports.createSell = async (req, res) => {
     // ✅ Commit transaction
     await session.commitTransaction();
 
-    return res.status(201).json({ success: true, message: "Sale processed successfully", memoId });
+    return res.status(201).json({ success: true, message: `Sale processed successfully on date", ${sellDate}, memoId, ${memoId}` });
 
   } catch (err) {
     await session.abortTransaction();
