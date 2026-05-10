@@ -6,6 +6,7 @@ const { addToInventory } = require("../services/inventory.service");
 
 const salesCol = db.collection("sales");
 const inventoryCol = db.collection("inventory");
+const productsCol = db.collection("products");
 const customersCol = db.collection("customers");
 
 async function deductFromInventory(product, memoId, session) {
@@ -257,19 +258,85 @@ module.exports.getSalesByCustomerId = async (req, res) => {
 /* =====================================================
    GET SINGLE SALE
 ===================================================== */
-module.exports.getSaleById = async (req, res) => {
+module.exports.getSaleById = async (
+  req,
+  res
+) => {
   try {
     const { id } = req.params;
 
-    const sale = await salesCol.findOne({ _id: new ObjectId(id) });
+    const sale =
+      await salesCol.findOne({
+        _id: new ObjectId(id),
+      });
 
     if (!sale) {
-      return res.status(404).json({ success: false, message: "Sale not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Sale not found",
+      });
     }
 
-    res.status(200).json({ success: true, sale });
+    /* ---------------------------------- */
+    /* FETCH PRODUCT NAMES */
+    /* ---------------------------------- */
+
+    const productIds =
+      sale.products
+        ?.map((p) => {
+          try {
+            return new ObjectId(
+              p.product_id
+            );
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean) || [];
+
+    const products =
+      await productsCol
+        .find({
+          _id: { $in: productIds },
+        })
+        .project({
+          item_name: 1,
+        })
+        .toArray();
+
+    /* ---------------------------------- */
+    /* CREATE PRODUCT MAP */
+    /* ---------------------------------- */
+
+    const productMap = new Map(
+      products.map((p) => [
+        p._id.toString(),
+        p.item_name,
+      ])
+    );
+
+    /* ---------------------------------- */
+    /* MERGE ITEM NAME INTO SALE PRODUCTS */
+    /* ---------------------------------- */
+
+    sale.products =
+      sale.products.map((p) => ({
+        ...p,
+        item_name:
+          productMap.get(
+            p.product_id?.toString()
+          ) || "Unknown Product",
+      }));
+
+    res.status(200).json({
+      success: true,
+      sale,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
 
