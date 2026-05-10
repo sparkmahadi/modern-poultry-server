@@ -140,7 +140,7 @@ module.exports.getSalesReport = async (req, res) => {
   try {
     const { type } = req.params;
     const { date, month, year, from, to } = req.query;
-console.log('hit getSales report', req.query, type);
+    console.log('hit getSales report', req.query, type);
     let matchQuery = {};
 
     /* --------------------------------------------------
@@ -153,7 +153,7 @@ console.log('hit getSales report', req.query, type);
       start.setUTCHours(0, 0, 0, 0);
       const end = new Date(date);
       end.setUTCHours(23, 59, 59, 999);
-      
+
       console.log("daily sale", start, end);
       matchQuery.date = { $gte: start, $lte: end };
     }
@@ -183,7 +183,7 @@ console.log('hit getSales report', req.query, type);
 
       const start = new Date(year, 0, 1);
       const end = new Date(Number(year) + 1, 0, 1);
-            console.log("yearly sale", start, end);
+      console.log("yearly sale", start, end);
 
       matchQuery.date = { $gte: start, $lt: end };
     }
@@ -235,6 +235,232 @@ console.log('hit getSales report', req.query, type);
   }
 };
 
+module.exports.getProductWiseSellRecord = async (
+  req,
+  res
+) => {
+  console.log(
+    "hit /product-sales"
+  );
+
+  try {
+    const result =
+      await salesCol
+        .aggregate([
+          // join customer
+          {
+            $lookup: {
+              from:
+                "customers",
+              localField:
+                "customer_id",
+              foreignField:
+                "_id",
+              as: "customer",
+            },
+          },
+
+          {
+            $unwind: {
+              path:
+                "$customer",
+              preserveNullAndEmptyArrays: true,
+            },
+          },
+
+          // flatten products
+          {
+            $unwind:
+              "$products",
+          },
+
+          // get product info
+          {
+            $lookup: {
+              from:
+                "products",
+              let: {
+                productId:
+                  "$products.product_id",
+              },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $eq: [
+                        {
+                          $toString:
+                            "$_id",
+                        },
+                        "$$productId",
+                      ],
+                    },
+                  },
+                },
+              ],
+              as: "productInfo",
+            },
+          },
+
+          {
+            $unwind: {
+              path:
+                "$productInfo",
+              preserveNullAndEmptyArrays: true,
+            },
+          },
+
+          // group by product
+          {
+            $group: {
+              _id:
+                "$products.product_id",
+
+              product_name:
+              {
+                $first:
+                  "$productInfo.item_name",
+              },
+
+              total_qty: {
+                $sum:
+                  "$products.qty",
+              },
+
+              total_sale_amount:
+              {
+                $sum:
+                  "$products.subtotal",
+              },
+
+              avg_sale_price:
+              {
+                $avg:
+                  "$products.sale_price",
+              },
+
+              total_sale_count:
+              {
+                $sum: 1,
+              },
+
+              sales: {
+                $push: {
+                  _id: {
+                    $toString:
+                      "$_id",
+                  },
+
+                  memoNo:
+                    "$memoNo",
+
+                  customer_id:
+                  {
+                    $cond: [
+                      "$customer_id",
+                      {
+                        $toString:
+                          "$customer_id",
+                      },
+                      null,
+                    ],
+                  },
+
+                  customer_name:
+                    "$customer.name",
+
+                  qty:
+                    "$products.qty",
+
+                  sale_price:
+                    "$products.sale_price",
+
+                  subtotal:
+                    "$products.subtotal",
+
+                  total_amount:
+                    "$total_amount",
+
+                  paid_amount:
+                    "$paid_amount",
+
+                  due_amount:
+                    "$due_amount",
+
+                  payment_method:
+                    "$payment_method",
+
+                  date:
+                    "$date",
+                },
+              },
+
+              last_sale_date:
+              {
+                $max:
+                  "$date",
+              },
+            },
+          },
+
+          // latest first
+          {
+            $sort: {
+              last_sale_date:
+                -1,
+            },
+          },
+
+          // final shape
+          {
+            $project: {
+              _id: 0,
+
+              product_id:
+                "$_id",
+
+              product_name: 1,
+
+              total_qty: 1,
+
+              total_sale_amount: 1,
+
+              avg_sale_price:
+              {
+                $round: [
+                  "$avg_sale_price",
+                  2,
+                ],
+              },
+
+              total_sale_count: 1,
+
+              last_sale_date: 1,
+
+              sales: 1,
+            },
+          },
+        ])
+        .toArray();
+
+    return res.status(200).json({
+      success: true,
+      count:
+        result.length,
+      data: result,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Failed to get product-wise sales records",
+      error:
+        error.message,
+    });
+  }
+}
 
 
 /* =====================================================
@@ -471,7 +697,7 @@ module.exports.updateSaleById = async (req, res) => {
        5️⃣ UPDATE SALE DOCUMENT
     -------------------------------------------------- */
 
-        const sellDate = date ? new Date(date) : new Date();
+    const sellDate = date ? new Date(date) : new Date();
 
     await salesCol.updateOne(
       { _id: saleId },
@@ -523,7 +749,7 @@ module.exports.deleteSale = async (req, res) => {
     await session.startTransaction();
 
     // 1️⃣ Revert Inventory: Add products back to stock
-     for (const item of existingSale.products) {
+    for (const item of existingSale.products) {
       await inventoryCol.updateOne(
         { product_id: new ObjectId(item.product_id) },
         {

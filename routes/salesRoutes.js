@@ -1,10 +1,11 @@
 const express = require("express");
-const { createSell, getSales, getSaleById, updateSaleById, getSalesByCustomerId, receiveCustomerDue, deleteSale, getSalesReport, receiveCustomerDueManually } = require("../controllers/sales.controller");
+const { createSell, getSales, getSaleById, updateSaleById, getSalesByCustomerId, receiveCustomerDue, deleteSale, getSalesReport, receiveCustomerDueManually, getProductWiseSellRecord } = require("../controllers/sales.controller");
 
 const router = express.Router();
 
 // Basic sell memo
 router.get("/", getSales);
+router.get("/product-sales", getProductWiseSellRecord);
 router.get("/reports/:type", getSalesReport);
 
 router.post("/create", createSell);

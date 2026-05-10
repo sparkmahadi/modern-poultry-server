@@ -1022,13 +1022,13 @@ async function updateAllProductPrices(
       const averagePurchasePrice =
         Number(
           inventory.average_purchase_price ||
-            0
+          0
         );
 
       const lastPurchasePrice =
         Number(
           inventory.last_purchase_price ||
-            0
+          0
         );
 
       console.log(
@@ -1602,6 +1602,181 @@ async function paySupplierDueManually(req, res) {
   }
 };
 
+async function getProductWisePurchaseRecord(
+  req,
+  res
+) {
+  console.log(
+    "hit /product-purchases"
+  );
+
+  try {
+    const result =
+      await purchasesCol
+        .aggregate([
+          // join supplier
+          {
+            $lookup: {
+              from: "suppliers",
+              localField:
+                "supplier_id",
+              foreignField:
+                "_id",
+              as: "supplier",
+            },
+          },
+
+          {
+            $unwind: {
+              path: "$supplier",
+              preserveNullAndEmptyArrays: true,
+            },
+          },
+
+          // flatten products array
+          {
+            $unwind:
+              "$products",
+          },
+
+          // group by product
+          {
+            $group: {
+              _id:
+                "$products.product_id",
+
+              product_name: {
+                $first:
+                  "$products.name",
+              },
+
+              total_qty: {
+                $sum:
+                  "$products.qty",
+              },
+
+              total_purchase_amount:
+                {
+                  $sum:
+                    "$products.subtotal",
+                },
+
+              avg_purchase_price:
+                {
+                  $avg:
+                    "$products.purchase_price",
+                },
+
+              total_purchase_count:
+                {
+                  $sum: 1,
+                },
+
+              purchases: {
+                $push: {
+                  _id: {
+                    $toString:
+                      "$_id",
+                  },
+
+                  supplier_id:
+                    {
+                      $toString:
+                        "$supplier_id",
+                    },
+
+                  supplier_name:
+                    "$supplier.name",
+
+                  qty: "$products.qty",
+
+                  purchase_price:
+                    "$products.purchase_price",
+
+                  subtotal:
+                    "$products.subtotal",
+
+                  payment_method:
+                    "$payment_method",
+
+                  paid_amount:
+                    "$paid_amount",
+
+                  payment_due:
+                    "$payment_due",
+
+                  date:
+                    "$date",
+                },
+              },
+
+              // latest purchase
+              last_purchase_date:
+                {
+                  $max:
+                    "$date",
+                },
+            },
+          },
+
+          // optional sorting
+          {
+            $sort: {
+              last_purchase_date:
+                -1,
+            },
+          },
+
+          // final shape
+          {
+            $project: {
+              _id: 0,
+
+              product_id:
+                "$_id",
+
+              product_name: 1,
+
+              total_qty: 1,
+
+              total_purchase_amount: 1,
+
+              avg_purchase_price:
+                {
+                  $round: [
+                    "$avg_purchase_price",
+                    2,
+                  ],
+                },
+
+              total_purchase_count: 1,
+
+              last_purchase_date: 1,
+
+              purchases: 1,
+            },
+          },
+        ])
+        .toArray();
+
+    return res.status(200).json({
+      success: true,
+      count: result.length,
+      data: result,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Failed to get product-wise purchase records",
+      error:
+        error.message,
+    });
+  }
+}
+
 
 
 module.exports = {
@@ -1614,5 +1789,6 @@ module.exports = {
   getPurchaseReport,
   paySupplierDueManually,
   getPurchasesBySupplierId,
-  updateAllProductPrices
+  updateAllProductPrices,
+  getProductWisePurchaseRecord
 };
