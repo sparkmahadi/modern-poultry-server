@@ -112,7 +112,14 @@ module.exports.createSell = async (req, res) => {
     // ✅ Commit transaction
     await session.commitTransaction();
 
-    return res.status(201).json({ success: true, message: `Sale processed successfully on date", ${sellDate}, memoId, ${memoId}` });
+    return res.status(201).json({
+      success: true,
+      message: "Sale processed successfully",
+      data: {
+        memoId,
+        date: sellDate
+      }
+    });
 
   } catch (err) {
     await session.abortTransaction();
@@ -554,6 +561,8 @@ module.exports.getSaleById = async (
           ) || "Unknown Product",
       }));
 
+    sale.date = sale.date ? new Date(sale.date).toISOString() : null;
+
     res.status(200).json({
       success: true,
       sale,
@@ -687,7 +696,8 @@ module.exports.updateSaleById = async (req, res) => {
         { _id: new ObjectId(existingSale.customer_id) },
         {
           $inc: { due: newDue - oldDue, advance: newAdvance - oldAdvance },
-          $set: { last_payment_date: new Date() },
+          // $set: { last_payment_date: new Date() },
+          $set: { last_payment_date: new Date().toISOString() }
         },
         { session }
       );
@@ -697,7 +707,8 @@ module.exports.updateSaleById = async (req, res) => {
        5️⃣ UPDATE SALE DOCUMENT
     -------------------------------------------------- */
 
-    const sellDate = date ? new Date(date) : new Date();
+    // const sellDate = date ? new Date(date) : new Date();
+    const sellDate = date ? new Date(date) : existingSale.date;
 
     await salesCol.updateOne(
       { _id: saleId },
@@ -707,9 +718,12 @@ module.exports.updateSaleById = async (req, res) => {
           total_amount: newTotal,
           paid_amount: newPaid,
           due_amount: newDue,
-          date: sellDate,
+          date: date ? new Date(date) : existingSale.date,
           payment_method: payload.payment_method || existingSale.payment_method,
-          account_id: payload.account_id ? new ObjectId(payload.account_id) : existingSale.account_id,
+          // account_id: payload.account_id ? new ObjectId(payload.account_id) : existingSale.account_id,
+          account_id: payload.account_id
+            ? new ObjectId(payload.account_id)
+            : existingSale.account_id || null,
           updatedAt: new Date()
         }
       },
@@ -888,7 +902,8 @@ module.exports.receiveCustomerDue = async (req, res) => {
         { _id: new ObjectId(sale.customer_id) },
         {
           $inc: { due: -payAmount },
-          $set: { last_payment_date: new Date() },
+          // $set: { last_payment_date: new Date() },
+          $set: { last_payment_date: new Date().toISOString() }
         },
         { session }
       );
