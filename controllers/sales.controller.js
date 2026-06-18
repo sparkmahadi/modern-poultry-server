@@ -134,14 +134,73 @@ module.exports.createSell = async (req, res) => {
 /* =====================================================
    GET ALL SALES
 ===================================================== */
+
+
 module.exports.getSales = async (req, res) => {
   try {
-    const sales = await salesCol.find({}).sort({ date: -1 }).toArray();
-    res.status(200).json({ success: true, data: sales });
+    const sales = await salesCol
+      .aggregate([
+        {
+          $lookup: {
+            from: "customers",
+            let: {
+              customerObjId: {
+                $toObjectId: "$customer_id",
+              },
+            },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $eq: ["$_id", "$$customerObjId"],
+                  },
+                },
+              },
+              {
+                $project: {
+                  _id: 1,
+                  name: 1,
+                },
+              },
+            ],
+            as: "customer",
+          },
+        },
+        {
+          $addFields: {
+            customer_name: {
+              $ifNull: [
+                { $arrayElemAt: ["$customer.name", 0] },
+                "Unknown Customer",
+              ],
+            },
+          },
+        },
+        {
+          $project: {
+            customer: 0,
+          },
+        },
+        {
+          $sort: {
+            date: -1,
+          },
+        },
+      ])
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      data: sales,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
+
 
 module.exports.getSalesReport = async (req, res) => {
   try {
