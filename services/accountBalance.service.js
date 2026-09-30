@@ -1,18 +1,27 @@
-import { ObjectId } from "mongodb";
+const { ObjectId } = require("mongodb");
 
-export async function updateAccountBalance({
+/**
+ * Updates a payment account's balance and records an audit transaction entry.
+ * Safely handles both standalone executions and caller-provided MongoDB sessions/transactions.
+ */
+async function updateAccountBalance({
   client,
   db,
   amount,
-  transactionType,   // "credit" | "debit"
-  entrySource,        // "sale" | "purchase" | "return" | "due_collection"
+  transactionType, // "credit" (inflow/income) | "debit" (outflow/expense)
+  entrySource,     // "sale" | "purchase" | "bill_create" | "customer_due_payment" | etc.
   accountId,
-  details = {}
+  details = {},
+  session: externalSession = null
 }) {
-  const session = client.startSession();
-console.log('from update account balance,', amount, transactionType, entrySource, accountId, details);
+  // Use caller session if supplied (e.g. inside an outer transaction), else spawn a local one
+  const session = externalSession || client.startSession();
+  const isLocalSession = !externalSession;
+
   try {
-    await session.startTransaction();
+    if (isLocalSession) {
+      await session.startTransaction();
+    }
 
     /* -----------------------
        VALIDATIONS
@@ -21,7 +30,8 @@ console.log('from update account balance,', amount, transactionType, entrySource
       return { success: false, message: "Account ID is required" };
     }
 
-    if (!amount || amount <= 0) {
+    const numericAmount = Number(amount);
+    if (!numericAmount || numericAmount <= 0) {
       return { success: false, message: "Invalid transaction amount" };
     }
 
@@ -34,7 +44,7 @@ console.log('from update account balance,', amount, transactionType, entrySource
     );
 
     if (!account) {
-      return { success: false, message: "Account not found" };
+      return { success: false, message: "Payment account not found" };
     }
 
     const previousBalance = Number(account.balance || 0);
@@ -43,24 +53,28 @@ console.log('from update account balance,', amount, transactionType, entrySource
        BALANCE CALCULATION
     ----------------------- */
     let newBalance;
-
     if (transactionType === "credit") {
-      newBalance = previousBalance + amount;
+      newBalance = previousBalance + numericAmount;
     } else if (transactionType === "debit") {
-      if (previousBalance < amount) {
-        return { success: false, message: "Insufficient balance" };
+      if (previousBalance < numericAmount) {
+        return { success: false, message: `Insufficient balance in ${account.bank_name || account.name || "account"}` };
       }
-      newBalance = previousBalance - amount;
+      newBalance = previousBalance - numericAmount;
     } else {
-      return { success: false, message: "Invalid transaction type" };
+      return { success: false, message: "Invalid transaction type (must be 'credit' or 'debit')" };
     }
 
     /* -----------------------
-       ACCOUNT UPDATE
+       ATOMIC ACCOUNT UPDATE
     ----------------------- */
     await accountsCol.updateOne(
       { _id: account._id },
-      { $set: { balance: newBalance } },
+      { 
+        $set: { 
+          balance: newBalance,
+          updatedAt: new Date()
+        } 
+      },
       { session }
     );
 
@@ -71,28 +85,25 @@ console.log('from update account balance,', amount, transactionType, entrySource
       {
         date: new Date(),
         time: new Date().toTimeString().split(" ")[0],
-
         account_id: account._id,
-        account_type: account.type,
-
+        account_type: account.type || "",
         entry_source: entrySource,
         transaction_type: transactionType,
-        amount,
-
+        amount: numericAmount,
         balance_before_transaction: previousBalance,
         balance_after_transaction: newBalance,
-
         payment_details: details.paymentDetails || {},
         products: details.products || [],
-        reference_id: details.invoiceId || details.memoId || null,
-
-        created_by: details.createdBy || "admin",
+        reference_id: details.invoiceId || details.memoId || details.saleId || details.bill_id || null,
+        created_by: details.createdBy || "system",
         remarks: details.remarks || ""
       },
       { session }
     );
 
-    await session.commitTransaction();
+    if (isLocalSession) {
+      await session.commitTransaction();
+    }
 
     return {
       success: true,
@@ -101,19 +112,22 @@ console.log('from update account balance,', amount, transactionType, entrySource
     };
 
   } catch (error) {
-    await session.abortTransaction();
-
+    if (isLocalSession) {
+      await session.abortTransaction();
+    }
     console.error("Account balance update failed:", error.message);
-
     return {
       success: false,
       message: error.message || "Account balance update failed"
     };
   } finally {
-    await session.endSession();
+    if (isLocalSession) {
+      await session.endSession();
+    }
   }
 }
 
+module.exports = { updateAccountBalance };
 
 
 
