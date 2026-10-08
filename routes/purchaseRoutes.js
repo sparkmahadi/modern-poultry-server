@@ -1,9 +1,16 @@
 const express = require('express');
-const { createPurchase, getPurchases, deletePurchase, getPurchaseById, updatePurchase, paySupplierDue, getPurchaseReport, getPurchasesBySupplierId, paySupplierDueManually, getProductWisePurchaseRecord } = require('../controllers/purchase.controller');
+const { createPurchase, getPurchases, deletePurchase, getPurchaseById, updatePurchase, paySupplierDue, getPurchaseReport, getPurchasesBySupplierId, paySupplierDueManually, getProductWisePurchaseRecord, createPurchaseReturn,
+    getPurchaseReturns, getPurchaseReturnById } = require('../controllers/purchase.controller');
 
 const router = express.Router();
 
-// router.route("/").get(createPurchase)
+// Add Purchase Return Route
+// --- PURCHASE RETURN ROUTES (Must come before generic :id routes) ---
+router.get("/returns", getPurchaseReturns);
+router.post("/return", createPurchaseReturn);
+router.get("/returns/:id", getPurchaseReturnById);
+
+
 // Supplier-side purchase invoice
 router.get("/", getPurchases);
 router.get("/reports/:type", getPurchaseReport);
@@ -18,5 +25,8 @@ router.patch("/pay-supplier-due-manually", paySupplierDueManually)
 
 router.delete("/:id", deletePurchase);
 router.post("/", createPurchase);
+
+
+
 
 module.exports = router;
