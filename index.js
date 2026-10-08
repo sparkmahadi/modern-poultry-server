@@ -127,3 +127,14 @@ app.use("/api/expense-threads", expenseThreadRoutes);
 
 const billsRoutes = require("./routes/bills.routes");
 app.use("/api/bills", billsRoutes);
+
+const disposeProductsRoutes = require("./routes/disposeProductsRoutes");
+app.use("/api/dispose-products", disposeProductsRoutes);
+
+const lendMoneyRoutes = require("./routes/lendMoneyRoutes");
+// ...
+app.use("/api/lend-money", lendMoneyRoutes);
+
+const borrowMoneyRoutes = require("./routes/borrowMoneyRoutes");
+// ...
+app.use("/api/borrow-money", borrowMoneyRoutes);

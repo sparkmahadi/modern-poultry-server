@@ -1,6 +1,7 @@
 const express = require('express');
 const { createPurchase, getPurchases, deletePurchase, getPurchaseById, updatePurchase, paySupplierDue, getPurchaseReport, getPurchasesBySupplierId, paySupplierDueManually, getProductWisePurchaseRecord, createPurchaseReturn,
-    getPurchaseReturns, getPurchaseReturnById } = require('../controllers/purchase.controller');
+    getPurchaseReturns, getPurchaseReturnById, deletePurchaseReturn, 
+    updatePurchaseReturn} = require('../controllers/purchase.controller');
 
 const router = express.Router();
 
@@ -9,6 +10,8 @@ const router = express.Router();
 router.get("/returns", getPurchaseReturns);
 router.post("/return", createPurchaseReturn);
 router.get("/returns/:id", getPurchaseReturnById);
+router.put("/returns/:id", updatePurchaseReturn);
+router.delete("/returns/:id", deletePurchaseReturn);
 
 
 // Supplier-side purchase invoice

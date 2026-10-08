@@ -1,7 +1,19 @@
 const express = require("express");
-const { createSell, getSales, getSaleById, updateSaleById, getSalesByCustomerId, receiveCustomerDue, deleteSale, getSalesReport, receiveCustomerDueManually, getProductWiseSellRecord } = require("../controllers/sales.controller");
+const { createSell, getSales, getSaleById, updateSaleById, getSalesByCustomerId, receiveCustomerDue, deleteSale, getSalesReport, receiveCustomerDueManually, getProductWiseSellRecord,
+    createSalesReturn,
+    getSalesReturns,
+    getSalesReturnById,
+    updateSalesReturnById, deleteSalesReturn
+} = require("../controllers/sales.controller");
 
 const router = express.Router();
+
+// --- 🆕 SALES RETURN ROUTES (Must precede :id) ---
+router.get("/returns", getSalesReturns);
+router.get("/returns/:id", getSalesReturnById);
+router.post("/return", createSalesReturn);
+router.put("/returns/:id", updateSalesReturnById);
+router.delete("/returns/:id", deleteSalesReturn);
 
 // Basic sell memo
 router.get("/", getSales);

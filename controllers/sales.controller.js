@@ -8,6 +8,8 @@ const salesCol = db.collection("sales");
 const inventoryCol = db.collection("inventory");
 const productsCol = db.collection("products");
 const customersCol = db.collection("customers");
+// Add with your collection definitions at the top
+const salesReturnsCol = db.collection("sales_returns");
 
 async function deductFromInventory(product, memoId, session) {
   try {
@@ -1206,5 +1208,541 @@ module.exports.receiveCustomerDueManually = async (req, res) => {
   } finally {
     await session.endSession();
     console.log("🔚 MongoDB session ended");
+  }
+};
+
+
+
+
+/* =====================================================
+   CREATE SALES RETURN
+===================================================== */
+module.exports.createSalesReturn = async (req, res) => {
+  const session = client.startSession();
+
+  try {
+    const {
+      customer_id,
+      original_memo_no,
+      date,
+      total_return_amount,
+      refund_amount = 0,
+      payment_method,
+      account_id,
+      notes,
+      products = []
+    } = req.body;
+
+    // 1️⃣ Validation
+    if (!customer_id) {
+      return res.status(400).json({ success: false, message: "Customer selection is required" });
+    }
+    if (!products || !Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ success: false, message: "At least one product must be returned" });
+    }
+    if (Number(refund_amount) > 0 && !account_id) {
+      return res.status(400).json({ success: false, message: "Payment account is required for cash refunds" });
+    }
+
+    const customerObjId = new ObjectId(customer_id);
+    const returnId = new ObjectId();
+    const returnDate = date ? new Date(date) : new Date();
+    const returnTotal = Number(total_return_amount || 0);
+    const refundPaid = Number(refund_amount || 0);
+
+    await session.startTransaction();
+
+    // 2️⃣ Verify Customer
+    const customer = await customersCol.findOne({ _id: customerObjId }, { session });
+    if (!customer) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: "Customer not found" });
+    }
+
+    // 3️⃣ Restock Inventory (Stock Increases)
+    for (const item of products) {
+      const productIdStr = extractProductId(item.product_id) || item._id;
+      if (!productIdStr) continue;
+
+      const productObjId = new ObjectId(productIdStr);
+      const returnQty = Number(item.qty || 0);
+      const returnPrice = Number(item.return_price || item.price || 0);
+      const subtotal = Number(item.subtotal || returnQty * returnPrice);
+
+      await inventoryCol.updateOne(
+        { product_id: productObjId },
+        {
+          $inc: { stock_qty: returnQty },
+          $set: { last_updated: new Date() }, $push: {
+            sales_return_history: {
+              return_id: returnId,
+              qty: returnQty,
+              price: returnPrice,
+              subtotal,
+              reason: item.reason || "Sales Return",
+              date: returnDate
+            }
+          }
+        },
+        { session }
+      );
+    }
+
+    // 4️⃣ Debit Payment Account if Cash Refund Paid
+    if (refundPaid > 0 && account_id) {
+      const paymentResult = await updateAccountBalance({
+        client,
+        db,
+        amount: refundPaid,
+        transactionType: "debit", // Money leaves the business account to refund customer
+        entrySource: "sales_return_refund",
+        accountId: account_id,
+        details: {
+          returnId,
+          customerId: customerObjId,
+          remarks: `Refund disbursed for sales return #${returnId.toString().slice(-6)}`
+        },
+        session
+      });
+
+      if (!paymentResult.success) throw new Error(paymentResult.message);
+    }
+
+    // 5️⃣ Update Customer Ledger & Outstanding Due
+    // Net credit reduces what customer owes: (Total Return Value - Refund Paid Out)
+    const netCredit = returnTotal - refundPaid;
+    const currentDue = Number(customer.due || 0);
+
+    let dueDiff = 0;
+    let advanceDiff = 0;
+
+    if (netCredit > 0) {
+      if (currentDue >= netCredit) {
+        dueDiff = netCredit;
+      } else {
+        dueDiff = currentDue;
+        advanceDiff = netCredit - currentDue; // Excess return turns into customer store credit
+      }
+    } else if (netCredit < 0) {
+      dueDiff = netCredit; // Edge case: refund given exceeded return value
+    }
+
+    await customersCol.updateOne(
+      { _id: customerObjId },
+      {
+        $inc: {
+          total_sales: -returnTotal,
+          total_due: -dueDiff,
+          due: -dueDiff,
+          advance: advanceDiff
+        },
+        $set: { last_return_date: returnDate }, $push: {
+          customer_history: {
+            date: returnDate,
+            type: "sales_return",
+            return_id: returnId,
+            products,
+            total_amount: returnTotal,
+            refund_amount: refundPaid,
+            due_after_return: Math.max(0, currentDue - dueDiff),
+            remarks: notes || "Sales return processed"
+          }
+        }
+      },
+      { session }
+    );
+
+    // 6️⃣ Save Sales Return Document
+    const returnDoc = {
+      _id: returnId,
+      customer_id: customerObjId,
+      original_memo_no: original_memo_no || null,
+      date: returnDate,
+      total_return_amount: returnTotal,
+      refund_amount: refundPaid,
+      payment_method: refundPaid > 0 ? payment_method : null,
+      account_id: refundPaid > 0 && account_id ? new ObjectId(account_id) : null,
+      notes: notes || "",
+      products: products.map((p) => ({
+        product_id: new ObjectId(extractProductId(p.product_id) || p._id),
+        name: p.name || p.item_name,
+        unit: p.unit || "pcs",
+        qty: Number(p.qty),
+        return_price: Number(p.return_price || p.price),
+        subtotal: Number(p.subtotal),
+        reason: p.reason
+      })),
+      createdAt: new Date()
+    };
+
+    await salesReturnsCol.insertOne(returnDoc, { session });
+
+    await session.commitTransaction();
+
+    return res.status(201).json({
+      success: true,
+      message: "Sales return processed successfully",
+      returnId
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    console.error("Sales return failed:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
+  }
+};
+
+/* =====================================================
+   GET ALL SALES RETURNS
+===================================================== */
+module.exports.getSalesReturns = async (req, res) => {
+  try {
+    const returns = await salesReturnsCol
+      .aggregate([
+        {
+          $lookup: {
+            from: "customers",
+            localField: "customer_id",
+            foreignField: "_id",
+            as: "customer"
+          }
+        },
+        {
+          $unwind: {
+            path: "$customer",
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $addFields: {
+            customer_name: "$customer.name",
+            customer_phone: "$customer.phone"
+          }
+        },
+        {
+          $project: { customer: 0 }
+        }, {
+          $sort: { date: -1 }
+        }
+      ])
+      .toArray();
+
+    return res.status(200).json({
+      success: true,
+      count: returns.length,
+      data: returns
+    });
+  } catch (err) {
+    console.error("getSalesReturns error:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/* =====================================================
+   GET SINGLE SALES RETURN BY ID
+===================================================== */
+module.exports.getSalesReturnById = async (req, res) => {
+  try {
+    const returnId = new ObjectId(req.params.id);
+
+    const result = await salesReturnsCol
+      .aggregate([
+        { $match: { _id: returnId } },
+        {
+          $lookup: {
+            from: "customers",
+            localField: "customer_id",
+            foreignField: "_id",
+            as: "customer"
+          }
+        },
+        {
+          $unwind: {
+            path: "$customer",
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $addFields: {
+            customer_name: "$customer.name",
+            customer_phone: "$customer.phone",
+            customer_due: "$customer.due",
+            address: "$customer.address"
+          }
+        },
+        {
+          $project: {
+            customer: 0
+          }
+        }
+      ])
+      .toArray();
+
+    if (!result || result.length === 0) {
+      return res.status(404).json({ success: false, message: "Sales return record not found" });
+    }
+
+    return res.status(200).json({ success: true, data: result[0] });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/* =====================================================
+   UPDATE SALES RETURN BY ID
+===================================================== */
+module.exports.updateSalesReturnById = async (req, res) => {
+  const session = client.startSession();
+
+  try {
+    const returnId = new ObjectId(req.params.id);
+    const {
+      customer_id,
+      original_memo_no,
+      date,
+      total_return_amount,
+      refund_amount = 0,
+      payment_method,
+      account_id,
+      notes,
+      products = []
+    } = req.body;
+
+    await session.startTransaction();
+
+    const existingReturn = await salesReturnsCol.findOne({ _id: returnId }, { session });
+    if (!existingReturn) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: "Return record not found" });
+    }
+
+    // 1️⃣ Rollback old inventory additions
+    for (const item of existingReturn.products) {
+      await inventoryCol.updateOne(
+        { product_id: new ObjectId(item.product_id) },
+        {
+          // ✅ Corrected
+          $inc: { stock_qty: -Number(item.qty || 0) }, $pull: { sales_return_history: { return_id: returnId } }
+        },
+
+        { session }
+      );
+    }
+
+    // 2️⃣ Rollback old payment (Credit money back into account if refund was paid)
+    if (existingReturn.refund_amount > 0 && existingReturn.account_id) {
+      await updateAccountBalance({
+        client,
+        db,
+        amount: Number(existingReturn.refund_amount),
+        transactionType: "credit",
+        entrySource: "sales_return_update_revert",
+        accountId: existingReturn.account_id.toString(),
+        details: { returnId, remarks: "Reverted previous return refund on update" },
+        session
+      });
+    }
+
+    // 3️⃣ Rollback old customer ledger balances
+    const oldNetCredit = Number(existingReturn.total_return_amount || 0) - Number(existingReturn.refund_amount || 0);
+    await customersCol.updateOne(
+      { _id: new ObjectId(existingReturn.customer_id) },
+      {
+        $inc: {
+          total_sales: Number(existingReturn.total_return_amount || 0),
+          due: oldNetCredit,
+          total_due: oldNetCredit > 0 ? oldNetCredit : 0
+        }
+      },
+      { session }
+    );
+
+    // 4️⃣ Apply new inventory additions
+    for (const item of products) {
+      const pId = new ObjectId(extractProductId(item.product_id) || item._id);
+      await inventoryCol.updateOne(
+        { product_id: pId },
+        {
+          $inc: { stock_qty: Number(item.qty || 0) },
+          $set: { last_updated: new Date() }, $push: {
+            sales_return_history: {
+              return_id: returnId,
+              qty: Number(item.qty),
+              price: Number(item.return_price || item.price || 0),
+              subtotal: Number(item.subtotal || 0),
+              reason: item.reason,
+              date: date ? new Date(date) : new Date()
+            }
+          }
+        },
+        { session }
+      );
+    }
+
+    // 5️⃣ Apply new refund disbursement
+    const newRefund = Number(refund_amount || 0);
+    if (newRefund > 0 && account_id) {
+      await updateAccountBalance({
+        client,
+        db,
+        amount: newRefund,
+        transactionType: "debit",
+        entrySource: "sales_return_update",
+        accountId: account_id.toString(),
+        details: { returnId, remarks: "Applied updated refund on return" },
+        session
+      });
+    }
+
+    // 6️⃣ Apply new customer balance adjustments
+    const newTotal = Number(total_return_amount || 0);
+    const newNetCredit = newTotal - newRefund;
+    await customersCol.updateOne(
+      { _id: new ObjectId(customer_id) },
+      {
+        $inc: { total_sales: -newTotal, due: -newNetCredit, total_due: -newNetCredit }, $set: { last_return_date: date ? new Date(date) : new Date() }
+      },
+      { session }
+    );
+
+    // 7️⃣ Update the sales return document
+    await salesReturnsCol.updateOne(
+      { _id: returnId },
+      {
+        $set: {
+          customer_id: new ObjectId(customer_id),
+          original_memo_no: original_memo_no || null,
+          date: date ? new Date(date) : existingReturn.date,
+          total_return_amount: newTotal,
+          refund_amount: newRefund,
+          payment_method: newRefund > 0 ? payment_method : null,
+          account_id: newRefund > 0 && account_id ? new ObjectId(account_id) : null,
+          notes: notes || "",
+          products: products.map((p) => ({
+            product_id: new ObjectId(extractProductId(p.product_id) || p._id),
+            name: p.name || p.item_name,
+            unit: p.unit || "pcs",
+            qty: Number(p.qty),
+            return_price: Number(p.return_price || p.price),
+            subtotal: Number(p.subtotal),
+            reason: p.reason
+          })),
+          updatedAt: new Date()
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    return res.status(200).json({
+      success: true,
+      message: "Sales return updated successfully"
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    console.error("Update sales return failed:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
+  }
+};
+
+
+/* =====================================================
+   DELETE / CANCEL SALES RETURN
+===================================================== */
+module.exports.deleteSalesReturn = async (req, res) => {
+  const session = client.startSession();
+
+  try {
+    const returnId = new ObjectId(req.params.id);
+
+    // 1️⃣ Find existing return record
+    const existingReturn = await salesReturnsCol.findOne({ _id: returnId });
+    if (!existingReturn) {
+      return res.status(404).json({ success: false, message: "Sales return record not found" });
+    }
+
+    await session.startTransaction();
+
+    // 2️⃣ Revert Inventory (Deduct stock that was added back into inventory during the return)
+    for (const item of existingReturn.products || []) {
+      const productIdStr = extractProductId(item.product_id) || item._id;
+      if (!productIdStr) continue;
+
+      await inventoryCol.updateOne(
+        { product_id: new ObjectId(productIdStr) },
+        {
+          $inc: { stock_qty: -Number(item.qty || 0) },
+          $pull: { sales_return_history: { return_id: returnId } },$set: { last_updated: new Date() }
+        },
+        { session }
+      );
+    }
+
+    // 3️⃣ Revert Refund Payment (If money was refunded to the customer, credit it back to the account)
+    if (Number(existingReturn.refund_amount || 0) > 0 && existingReturn.account_id) {
+      const revertResult = await updateAccountBalance({
+        client,
+        db,
+        amount: Number(existingReturn.refund_amount),
+        transactionType: "credit", // Reversing a refund payment (outflow) requires a credit
+        entrySource: "sales_return_delete",
+        accountId: existingReturn.account_id.toString(),
+        details: {
+          returnId,
+          remarks: `Revert refund from cancelled sales return #${returnId.toString().slice(-6)}`
+        },
+        session
+      });
+
+      if (!revertResult.success) throw new Error(revertResult.message);
+    }
+
+    // 4️⃣ Revert Customer Ledger Balances
+    if (existingReturn.customer_id) {
+      const returnTotal = Number(existingReturn.total_return_amount || 0);
+      const refundPaid = Number(existingReturn.refund_amount || 0);
+      const netCredit = returnTotal - refundPaid;
+
+      await customersCol.updateOne(
+        { _id: new ObjectId(existingReturn.customer_id) },
+        {
+          $inc: {
+            total_sales: returnTotal,
+            due: netCredit,
+            total_due: netCredit > 0 ? netCredit : 0
+          },
+          $push: {
+            customer_history: {
+              date: new Date(),
+              type: "cancelled_sales_return",
+              return_id: returnId,
+              total_amount: returnTotal,
+              remarks: "Sales return cancelled and reverted"
+            }
+          }
+        },
+        { session }
+      );
+    }
+
+    // 5️⃣ Delete Return Document
+    await salesReturnsCol.deleteOne({ _id: returnId }, { session });
+
+    await session.commitTransaction();
+
+    return res.status(200).json({
+      success: true,
+      message: "Sales return cancelled and balances reverted successfully"
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    console.error("Delete sales return failed:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
   }
 };

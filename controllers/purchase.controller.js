@@ -9,6 +9,9 @@ const productsCol = db.collection("products");
 const inventoryCol = db.collection("inventory");
 const suppliersCol = db.collection("suppliers");
 
+// Add with your collection declarations at the top:
+const purchaseReturnsCol = db.collection("purchase_returns");
+
 
 // -------------------- GET PURCHASES --------------------
 async function getPurchases(req, res) {
@@ -1480,8 +1483,6 @@ async function getProductWisePurchaseRecord(
 }
 
 
-// Add with your collection declarations at the top:
-const purchaseReturnsCol = db.collection("purchase_returns");
 
 // -------------------- CREATE PURCHASE RETURN --------------------
 async function createPurchaseReturn(req, res) {
@@ -1497,12 +1498,18 @@ async function createPurchaseReturn(req, res) {
       supplier_id,
       products,
       total_return_amount,
-      refund_received = 0,
+      refund_received,
+      refund_amount,
       payment_method,
       account_id,
+      paymentAccountId,
       note = "",
       date
     } = req.body;
+
+    // Support both naming conventions
+    const effectiveRefund = Number(refund_received ?? refund_amount ?? 0);
+    const effectiveAccountId = account_id || paymentAccountId;
 
     // 1️⃣ Validations
     if (!supplier_id) {
@@ -1511,11 +1518,10 @@ async function createPurchaseReturn(req, res) {
     if (!products || !Array.isArray(products) || products.length === 0) {
       return res.status(400).json({ success: false, message: "Products list cannot be empty" });
     }
-    if (Number(refund_received) > 0 && !account_id) {
+    if (effectiveRefund > 0 && !effectiveAccountId) {
       return res.status(400).json({ success: false, message: "Account selection is required when receiving a cash refund" });
     }
 
-    // Parse date
     let returnDate = new Date();
     if (date) {
       const parsedDate = new Date(date);
@@ -1528,7 +1534,6 @@ async function createPurchaseReturn(req, res) {
     const supplierId = normalizeIdV2(supplier_id, "supplier_id");
     const returnId = new ObjectId();
     const returnAmount = Number(total_return_amount || 0);
-    const refundAmount = Number(refund_received || 0);
 
     await session.startTransaction();
     console.log("✅ Transaction started");
@@ -1558,7 +1563,7 @@ async function createPurchaseReturn(req, res) {
       await inventoryCol.updateOne(
         { product_id: productObjId },
         {
-          $inc: { stock_qty: -returnQty }, $push: {
+          $inc: { stock_qty: -returnQty },$push: {
             return_history: {
               return_id: returnId.toString(),
               qty: returnQty,
@@ -1572,27 +1577,25 @@ async function createPurchaseReturn(req, res) {
         { session }
       );
 
-      // Recalculate average purchase price using your service
       await recalculateAveragePurchasePrice(productObjId, session);
     }
 
-    // 4️⃣ Credit Refund to Selected Payment Account (Money received into our account)
-    if (refundAmount > 0 && account_id) {
-      const accountObjId = normalizeIdV2(account_id, "account_id");
+    // 4️⃣ Credit Refund to Selected Payment Account (Consistent with createPurchase without passing session)
+    if (effectiveRefund > 0 && effectiveAccountId) {
+      const accountObjId = normalizeIdV2(effectiveAccountId, "account_id");
 
       const paymentResult = await updateAccountBalance({
         client,
         db,
-        amount: refundAmount,
-        transactionType: "credit", // money credited back into our business account
+        amount: effectiveRefund,
+        transactionType: "credit", // money received back into our account
         entrySource: "purchase_return",
         accountId: accountObjId.toString(),
         details: {
           returnId,
           supplierId,
           remarks: `Refund received for purchase return ${returnId}`
-        },
-        session
+        }
       });
 
       console.log("💳 Refund account balance update result:", paymentResult);
@@ -1600,8 +1603,7 @@ async function createPurchaseReturn(req, res) {
     }
 
     // 5️⃣ Update Supplier Balances & Ledger History
-    // Net return credit reduces what we owe to the supplier
-    const netReturnCredit = returnAmount - refundAmount;
+    const netReturnCredit = returnAmount - effectiveRefund;
     const currentDue = Number(supplier.due || 0);
 
     let dueDiff = 0;
@@ -1615,7 +1617,7 @@ async function createPurchaseReturn(req, res) {
         advanceDiff = netReturnCredit - currentDue;
       }
     } else if (netReturnCredit < 0) {
-      dueDiff = netReturnCredit; // Edge case: refund received was higher than goods value
+      dueDiff = netReturnCredit;
     }
 
     await suppliersCol.updateOne(
@@ -1627,14 +1629,14 @@ async function createPurchaseReturn(req, res) {
           due: -dueDiff,
           advance: advanceDiff
         },
-        $set: { updatedAt: new Date() }, $push: {
+        $set: { updatedAt: new Date() },$push: {
           supplier_history: {
             date: returnDate,
             type: "purchase_return",
             return_id: returnId,
             products,
             total_amount: returnAmount,
-            refund_received: refundAmount,
+            refund_received: effectiveRefund,
             due_after_return: Math.max(0, currentDue - dueDiff),
             remarks: note || "Purchase return processed"
           }
@@ -1649,9 +1651,9 @@ async function createPurchaseReturn(req, res) {
       supplier_id: supplierId,
       products,
       total_return_amount: returnAmount,
-      refund_received: refundAmount,
-      payment_method: refundAmount > 0 ? payment_method : null,
-      account_id: refundAmount > 0 && account_id ? normalizeIdV2(account_id, "account_id") : null,
+      refund_received: effectiveRefund,
+      payment_method: effectiveRefund > 0 ? payment_method : null,
+      account_id: effectiveRefund > 0 && effectiveAccountId ? normalizeIdV2(effectiveAccountId, "account_id") : null,
       note,
       date: returnDate,
       created_at: new Date()
@@ -1659,7 +1661,6 @@ async function createPurchaseReturn(req, res) {
 
     await purchaseReturnsCol.insertOne(returnDoc, { session });
 
-    // 7️⃣ Commit Transaction
     await session.commitTransaction();
     console.log("✅ Purchase Return committed successfully");
 
@@ -1681,7 +1682,6 @@ async function createPurchaseReturn(req, res) {
 // -------------------- GET ALL PURCHASE RETURNS --------------------
 async function getPurchaseReturns(req, res) {
   try {
-    console.log('hit getPurchaseReturns');
     const returns = await purchaseReturnsCol.aggregate([
       {
         $lookup: {
@@ -1698,15 +1698,28 @@ async function getPurchaseReturns(req, res) {
         }
       },
       {
-        $addFields: {
-          supplier_name: "$supplier.name",
-          supplier_phone: "$supplier.phone"
+        $lookup: {
+          from: "payment_accounts",
+          localField: "account_id",
+          foreignField: "_id",
+          as: "account"
         }
       },
       {
-        $project: { supplier: 0 }
-      }, {
-        $sort: { date: -1 }
+        $unwind: {
+          path: "$account",
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      {
+        $addFields: {
+          supplier_name: "$supplier.name",
+          supplier_phone: "$supplier.phone",
+          account_name: "$account.name"
+        }
+      },
+      {
+        $project: { supplier: 0, account: 0 }       },       {$sort: { date: -1 }
       }
     ]).toArray();
 
@@ -1725,18 +1738,454 @@ async function getPurchaseReturns(req, res) {
 async function getPurchaseReturnById(req, res) {
   try {
     const returnId = normalizeIdV2(req.params.id, "returnId");
-    const purchaseReturn = await purchaseReturnsCol.findOne({ _id: returnId });
+    
+    const result = await purchaseReturnsCol.aggregate([
+      { $match: { _id: returnId } },
+      {
+        $lookup: {
+          from: "suppliers",
+          localField: "supplier_id",
+          foreignField: "_id",
+          as: "supplier"
+        }
+      },
+      { $unwind: { path: "$supplier", preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: "payment_accounts",
+          localField: "account_id",
+          foreignField: "_id",
+          as: "account"
+        }
+      },
+      { $unwind: { path: "$account", preserveNullAndEmptyArrays: true } },
+      {
+        $addFields: {
+          supplier_name: "$supplier.name",
+          supplier_phone: "$supplier.phone",
+          due: "$supplier.due",
+          advance: "$supplier.advance",
+          account_name: "$account.name"
+        }
+      },
+      { $project: { supplier: 0, account: 0 } }
+    ]).toArray();
 
-    if (!purchaseReturn) {
+    if (!result || result.length === 0) {
       return res.status(404).json({ success: false, message: "Purchase return not found" });
     }
 
-    return res.status(200).json({ success: true, data: purchaseReturn });
+    return res.status(200).json({ success: true, data: result[0] });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 }
 
+/* =====================================================
+   UPDATE PURCHASE RETURN BY ID
+===================================================== */
+async function updatePurchaseReturn(req, res) {
+  const session = client.startSession();
+
+  try {
+    console.log("====================================");
+    console.log("🚀 UPDATE PURCHASE RETURN START");
+    console.log("====================================");
+    console.log("📥 Return ID:", req.params.id);
+    console.log("📥 Payload:", JSON.stringify(req.body, null, 2));
+
+    const returnId = normalizeIdV2(req.params.id, "returnId");
+    const {
+      supplier_id,
+      products = [],
+      total_return_amount,
+      refund_received,
+      refund_amount,
+      payment_method,
+      account_id,
+      paymentAccountId,
+      note = "",
+      date
+    } = req.body;
+
+    const newRefund = Number(refund_received ?? refund_amount ?? 0);
+    const newTotal = Number(total_return_amount || 0);
+    const newAccountId = account_id || paymentAccountId;
+
+    // 1️⃣ Input Validation
+    if (!supplier_id) {
+      return res.status(400).json({ success: false, message: "Supplier ID is required" });
+    }
+    if (!products || !Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ success: false, message: "Products list cannot be empty" });
+    }
+    if (newRefund > 0 && !newAccountId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Payment account selection is required when receiving a cash refund" 
+      });
+    }
+
+    await session.startTransaction();
+    console.log("✅ Transaction started");
+
+    const existingReturn = await purchaseReturnsCol.findOne({ _id: returnId }, { session });
+    if (!existingReturn) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: "Purchase return record not found" });
+    }
+
+    const supplierId = normalizeIdV2(supplier_id, "supplier_id");
+    const supplier = await suppliersCol.findOne({ _id: supplierId }, { session });
+    if (!supplier) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: "Supplier not found" });
+    }
+
+    // 2️⃣ Rollback Old Inventory Deductions (Restore stock)
+    for (const item of existingReturn.products || []) {
+      const productIdStr = extractProductId(item.product_id);
+      if (!productIdStr) continue;
+
+      const productObjId = new ObjectId(productIdStr);
+      const oldQty = Number(item.qty || 0);
+
+      await inventoryCol.updateOne(
+        { product_id: productObjId },
+        {
+          $inc: { stock_qty: oldQty },$pull: { return_history: { return_id: returnId.toString() } }
+        },
+        { session }
+      );
+
+      await recalculateAveragePurchasePrice(productObjId, session);
+    }
+
+    // 3️⃣ Account Balance Adjustments
+    const oldRefund = Number(existingReturn.refund_received ?? existingReturn.refund_amount ?? 0);
+    const oldAccountIdRaw = existingReturn.account_id || existingReturn.paymentAccountId;
+    const oldAccountIdStr = oldAccountIdRaw ? oldAccountIdRaw.toString() : null;
+    const newAccountIdStr = newAccountId ? normalizeIdV2(newAccountId, "account_id").toString() : null;
+
+    console.log("💰 Old Refund:", oldRefund, "on Account:", oldAccountIdStr);
+    console.log("💰 New Refund:", newRefund, "on Account:", newAccountIdStr);
+
+    if (oldAccountIdStr && newAccountIdStr && oldAccountIdStr === newAccountIdStr) {
+      // Same account: calculate net difference to avoid false "insufficient balance" rejections
+      const refundDiff = newRefund - oldRefund;
+
+      if (refundDiff > 0) {
+        console.log(`📈 Crediting +৳${refundDiff} to Account:`, newAccountIdStr);
+        const paymentResult = await updateAccountBalance({
+          client,
+          db,
+          amount: refundDiff,
+          transactionType: "credit", // Net refund increased -> add money to account
+          entrySource: "purchase_return_update",
+          accountId: newAccountIdStr,
+          details: {
+            returnId,
+            supplierId,
+            remarks: `Net refund increase for return #${returnId.toString().slice(-6)}`
+          },
+          session
+        });
+        if (!paymentResult.success) throw new Error(paymentResult.message);
+      } else if (refundDiff < 0) {
+        console.log(`📉 Debiting -৳${Math.abs(refundDiff)} from Account:`, newAccountIdStr);
+        const paymentResult = await updateAccountBalance({
+          client,
+          db,
+          amount: Math.abs(refundDiff),
+          transactionType: "debit", // Net refund decreased -> deduct money from account
+          entrySource: "purchase_return_update",
+          accountId: newAccountIdStr,
+          details: {
+            returnId,
+            supplierId,
+            remarks: `Net refund reduction for return #${returnId.toString().slice(-6)}`
+          },
+          session
+        });
+        if (!paymentResult.success) throw new Error(paymentResult.message);
+      }
+    } else {
+      // Different accounts: Revert old account (debit), then credit new account
+      if (oldRefund > 0 && oldAccountIdStr) {
+        console.log(`🔄 Reverting old refund of ৳${oldRefund} from Account:`, oldAccountIdStr);
+        const revertResult = await updateAccountBalance({
+          client,
+          db,
+          amount: oldRefund,
+          transactionType: "debit",
+          entrySource: "purchase_return_update",
+          accountId: oldAccountIdStr,
+          details: {
+            returnId,
+            remarks: `Revert refund on account switch for return #${returnId.toString().slice(-6)}`
+          },
+          session
+        });
+        if (!revertResult.success) throw new Error(revertResult.message);
+      }
+
+      if (newRefund > 0 && newAccountIdStr) {
+        console.log(`💸 Depositing new refund of ৳${newRefund} to Account:`, newAccountIdStr);
+        const paymentResult = await updateAccountBalance({
+          client,
+          db,
+          amount: newRefund,
+          transactionType: "credit",
+          entrySource: "purchase_return_update",
+          accountId: newAccountIdStr,
+          details: {
+            returnId,
+            supplierId,
+            remarks: `Deposit refund on account switch for return #${returnId.toString().slice(-6)}`
+          },
+          session
+        });
+        if (!paymentResult.success) throw new Error(paymentResult.message);
+      }
+    }
+
+    // 4️⃣ Rollback Old Supplier Balances
+    const oldTotal = Number(existingReturn.total_return_amount || 0);
+    const oldNetCredit = oldTotal - oldRefund;
+
+    await suppliersCol.updateOne(
+      { _id: new ObjectId(existingReturn.supplier_id) },
+      {
+        $inc: {
+          total_purchase: oldTotal,
+          due: oldNetCredit,
+          total_due: oldNetCredit > 0 ? oldNetCredit : 0
+        }
+      },
+      { session }
+    );
+
+    // 5️⃣ Apply New Inventory Deductions
+    let returnDate = existingReturn.date;
+    if (date) {
+      const parsed = new Date(date);
+      if (!isNaN(parsed.getTime())) returnDate = parsed;
+    }
+
+    for (const item of products) {
+      const productIdStr = extractProductId(item.product_id);
+      if (!productIdStr) continue;
+
+      const productObjId = new ObjectId(productIdStr);
+      const newQty = Number(item.qty || 0);
+      const newPrice = Number(item.return_price || item.purchase_price || 0);
+      const subtotal = Number(item.subtotal || newQty * newPrice);
+
+      await inventoryCol.updateOne(
+        { product_id: productObjId },
+        {
+          $inc: { stock_qty: -newQty },$push: {
+            return_history: {
+              return_id: returnId.toString(),
+              qty: newQty,
+              return_price: newPrice,
+              subtotal,
+              reason: item.reason || "Return to supplier",
+              date: returnDate
+            }
+          }
+        },
+        { session }
+      );
+
+      await recalculateAveragePurchasePrice(productObjId, session);
+    }
+
+    // 6️⃣ Apply New Supplier Ledger Adjustments
+    const newNetCredit = newTotal - newRefund;
+    const currentSupplier = await suppliersCol.findOne({ _id: supplierId }, { session });
+    const currentDue = Number(currentSupplier?.due || 0);
+
+    let dueDiff = 0;
+    let advanceDiff = 0;
+
+    if (newNetCredit > 0) {
+      if (currentDue >= newNetCredit) {
+        dueDiff = newNetCredit;
+      } else {
+        dueDiff = currentDue;
+        advanceDiff = newNetCredit - currentDue;
+      }
+    } else if (newNetCredit < 0) {
+      dueDiff = newNetCredit;
+    }
+
+    await suppliersCol.updateOne(
+      { _id: supplierId },
+      {
+        $inc: {
+          total_purchase: -newTotal,
+          total_due: -dueDiff,
+          due: -dueDiff,
+          advance: advanceDiff
+        },
+        $set: { updatedAt: new Date() },$push: {
+          supplier_history: {
+            date: returnDate,
+            type: "purchase_return_updated",
+            return_id: returnId,
+            products,
+            total_amount: newTotal,
+            refund_received: newRefund,
+            due_after_return: Math.max(0, currentDue - dueDiff),
+            remarks: note || "Purchase return updated"
+          }
+        }
+      },
+      { session }
+    );
+
+    // 7️⃣ Update the Return Document
+    await purchaseReturnsCol.updateOne(
+      { _id: returnId },
+      {
+        $set: {
+          supplier_id: supplierId,
+          products: products.map((p) => ({
+            product_id: new ObjectId(extractProductId(p.product_id) || p._id),
+            name: p.name || p.item_name,
+            unit: p.unit || "pcs",
+            qty: Number(p.qty),
+            return_price: Number(p.return_price || p.purchase_price || 0),
+            subtotal: Number(p.subtotal || 0),
+            reason: p.reason || "Return to supplier"
+          })),
+          total_return_amount: newTotal,
+          refund_received: newRefund,
+          payment_method: newRefund > 0 ? payment_method : null,
+          account_id: newRefund > 0 && newAccountIdStr ? new ObjectId(newAccountIdStr) : null,
+          note,
+          date: returnDate,
+          updated_at: new Date()
+        }
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    console.log("✅ Purchase Return update committed successfully");
+
+    return res.status(200).json({
+      success: true,
+      message: "Purchase return updated successfully"
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    console.error("❌ Update purchase return failed:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
+  }
+}
+
+// -------------------- DELETE / CANCEL PURCHASE RETURN --------------------
+async function deletePurchaseReturn(req, res) {
+  const session = client.startSession();
+
+  try {
+    const returnId = normalizeIdV2(req.params.id, "returnId");
+    const existingReturn = await purchaseReturnsCol.findOne({ _id: returnId });
+
+    if (!existingReturn) {
+      return res.status(404).json({ success: false, message: "Purchase return record not found" });
+    }
+
+    await session.startTransaction();
+
+    // 1️⃣ Revert Inventory: restore deducted products back to stock
+    for (const item of existingReturn.products || []) {
+      const productIdStr = extractProductId(item.product_id);
+      if (!productIdStr) continue;
+
+      const productObjId = new ObjectId(productIdStr);
+      const returnQty = Number(item.qty || 0);
+
+      await inventoryCol.updateOne(
+        { product_id: productObjId },
+        {
+          $inc: { stock_qty: returnQty },$pull: { return_history: { return_id: returnId.toString() } }
+        },
+        { session }
+      );
+
+      await recalculateAveragePurchasePrice(productObjId, session);
+    }
+
+    // 2️⃣ Revert Refund Payment: debit refund out of account
+    const refundToRevert = Number(existingReturn.refund_received ?? existingReturn.refund_amount ?? 0);
+    const accountToRevert = existingReturn.account_id || existingReturn.paymentAccountId;
+
+    if (refundToRevert > 0 && accountToRevert) {
+      const revertResult = await updateAccountBalance({
+        client,
+        db,
+        amount: refundToRevert,
+        transactionType: "debit",
+        entrySource: "purchase_return_delete",
+        accountId: accountToRevert.toString(),
+        details: {
+          returnId,
+          remarks: `Revert refund received on cancelled purchase return #${returnId.toString().slice(-6)}`
+        }
+      });
+
+      if (!revertResult.success) throw new Error(revertResult.message);
+    }
+
+    // 3️⃣ Revert Supplier Ledger
+    if (existingReturn.supplier_id) {
+      const returnTotal = Number(existingReturn.total_return_amount || 0);
+      const netCredit = returnTotal - refundToRevert;
+
+      await suppliersCol.updateOne(
+        { _id: new ObjectId(existingReturn.supplier_id) },
+        {
+          $inc: {
+            total_purchase: returnTotal,
+            total_due: netCredit > 0 ? netCredit : 0,
+            due: netCredit
+          },
+          $push: {
+            supplier_history: {
+              date: new Date(),
+              type: "cancelled_purchase_return",
+              return_id: returnId,
+              total_amount: returnTotal,
+              remarks: "Purchase return cancelled and reverted"
+            }
+          }
+        },
+        { session }
+      );
+    }
+
+    // 4️⃣ Delete Record
+    await purchaseReturnsCol.deleteOne({ _id: returnId }, { session });
+
+    await session.commitTransaction();
+
+    return res.status(200).json({
+      success: true,
+      message: "Purchase return cancelled and balances reverted successfully"
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    console.error("Delete purchase return failed:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
+  }
+}
 
 module.exports = {
   createPurchase,
@@ -1752,5 +2201,7 @@ module.exports = {
   getProductWisePurchaseRecord,
   createPurchaseReturn,
   getPurchaseReturns,
-  getPurchaseReturnById
+  getPurchaseReturnById,
+  updatePurchaseReturn,
+  deletePurchaseReturn
 };
