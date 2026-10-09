@@ -1,169 +1,179 @@
 const { ObjectId } = require("mongodb");
 const { db } = require("../db");
+const customersCol = db.collection("customers");
 
-// Create a new customer
+// Helper: Escape regex characters
+const escapeRegex = (string) => {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
+// ➕ Create a new customer
 exports.createCustomer = async (req, res) => {
-  console.log('hit create customer');
   const { name, address, phone, type, manual_due, manual_advance, due, advance, status } = req.body;
-  console.log(req.body)
 
-  if (!name || !type) {
-    return res.status(400).json({ success: false, message: "Name and type are required." });
+  if (!name || !name.trim()) {
+    return res.status(400).json({ success: false, message: "Customer name is required." });
   }
 
   try {
-    const result = await db.collection("customers").insertOne({
-      name,
-      address: address || "",
-      phone: phone || "",
-      type,
-      manual_due: manual_due || 0,
-      manual_advance: manual_advance || 0,
-      due: due || 0,
-      advance: advance || 0,
+    const newCustomer = {
+      name: name.trim(),
+      address: address ? address.trim() : "",
+      phone: phone ? phone.trim() : "",
+      type: type || "permanent",
+      manual_due: Number(manual_due) || 0,
+      manual_advance: Number(manual_advance) || 0,
+      due: Number(due) || 0,
+      advance: Number(advance) || 0,
+      total_sales: 0,
+      total_due: Number(due) || 0,
       status: status || "active",
       createdAt: new Date(),
-    });
+      updatedAt: new Date(),
+    };
 
-    if (result.acknowledged) {
-      res.send({ success: true, data: result });
-    }
+    const result = await customersCol.insertOne(newCustomer);
+    return res.status(201).json({
+      success: true,
+      message: "Customer created successfully",
+      data: { _id: result.insertedId, ...newCustomer },
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("createCustomer error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// Get all customers
+// 📦 Get all customers (with optional search and sorting)
 exports.getCustomers = async (req, res) => {
   try {
-    const customers = await db.collection("customers").find({}).toArray();
-    res.status(200).json({ success: true, data: customers });
+    const { q } = req.query;
+    let query = {};
+
+    if (q && q.trim()) {
+      const regex = new RegExp(escapeRegex(q.trim()), "i");
+      query = {
+        $or: [
+          { name: { $regex: regex } },
+          { phone: { $regex: regex } },
+          { address: { $regex: regex } },
+          { type: { $regex: regex } },
+        ],
+      };
+    }
+
+    const customers = await customersCol.find(query).sort({ createdAt: -1 }).toArray();
+    return res.status(200).json({ success: true, count: customers.length, data: customers });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("getCustomers error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// Get all customers
+// 🔍 Get customer by ID
 exports.getCustomerById = async (req, res) => {
-  const id = req.params.id;
+  const { id } = req.params;
+
+  if (!id || !ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, message: "Valid customer ID is required" });
+  }
+
   try {
-    const customer = await db.collection("customers").findOne({ _id: new ObjectId(id) });
-    console.log("getCustomerById",id, 'found', customer);
-    res.status(200).json({ success: true, data: customer });
+    const customer = await customersCol.findOne({ _id: new ObjectId(id) });
+    if (!customer) {
+      return res.status(404).json({ success: false, message: "Customer not found" });
+    }
+    return res.status(200).json({ success: true, data: customer });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("getCustomerById error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-
+// 🔎 Search customers autocomplete (Debounced endpoint)
 exports.searchCustomers = async (req, res) => {
-  console.log("hit search customers");
   const searchTerm = req.query.q?.trim();
 
   if (!searchTerm || searchTerm === "") {
-    return res.status(400).json({ success: false, message: "Search term is required." });
+    return res.status(400).json({ success: false, message: "Search query is required." });
   }
 
   try {
-    const regex = new RegExp(searchTerm, "i");
-    const results = await db
-      .collection("customers")
+    const regex = new RegExp(escapeRegex(searchTerm), "i");
+    const results = await customersCol
       .find({
         $or: [
           { name: { $regex: regex } },
           { phone: { $regex: regex } },
+          { address: { $regex: regex } },
+          { type: { $regex: regex } },
         ],
       })
-      .limit(10)
+      .limit(15)
       .toArray();
 
-    res.status(200).json({ success: true, data: results });
+    return res.status(200).json({ success: true, count: results.length, data: results });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("searchCustomers error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-
-// Update a customer
+// ✏️ Update customer details
 exports.updateCustomer = async (req, res) => {
   const { id } = req.params;
-  const { _id, ...updateData } = req.body;
-  console.log(updateData);
-  try {
-    const result = await db.collection("customers").updateOne(
-      { _id: new ObjectId(id) },
-      { $set: updateData },
-      { returnDocument: "after" }
-    );
 
-    if (!result.modifiedCount) {
+  if (!id || !ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, message: "Valid customer ID is required" });
+  }
+
+  const { _id, ...updateData } = req.body;
+
+  try {
+    const existing = await customersCol.findOne({ _id: new ObjectId(id) });
+    if (!existing) {
       return res.status(404).json({ success: false, message: "Customer not found." });
     }
 
-    res.send({ success: true, data: result });
+    const payload = {
+      name: updateData.name !== undefined ? updateData.name.trim() : existing.name,
+      address: updateData.address !== undefined ? updateData.address.trim() : existing.address,
+      phone: updateData.phone !== undefined ? updateData.phone.trim() : existing.phone,
+      type: updateData.type || existing.type,
+      manual_due: updateData.manual_due !== undefined ? (Number(updateData.manual_due) || 0) : (existing.manual_due || 0),
+      manual_advance: updateData.manual_advance !== undefined ? (Number(updateData.manual_advance) || 0) : (existing.manual_advance || 0),
+      due: updateData.due !== undefined ? (Number(updateData.due) || 0) : (existing.due || 0),
+      advance: updateData.advance !== undefined ? (Number(updateData.advance) || 0) : (existing.advance || 0),
+      status: updateData.status || existing.status,
+      updatedAt: new Date(),
+    };
+
+    await customersCol.updateOne({ _id: new ObjectId(id) }, { $set: payload });
+    const updated = await customersCol.findOne({ _id: new ObjectId(id) });
+
+    return res.status(200).json({ success: true, message: "Customer updated successfully", data: updated });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("updateCustomer error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// Delete a customer
+// ❌ Delete customer
 exports.deleteCustomer = async (req, res) => {
   const { id } = req.params;
 
-  try {
-    const result = await db.collection("customers").deleteOne({ _id: new ObjectId(id) });
+  if (!id || !ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, message: "Valid customer ID is required" });
+  }
 
+  try {
+    const result = await customersCol.deleteOne({ _id: new ObjectId(id) });
     if (result.deletedCount === 0) {
       return res.status(404).json({ success: false, message: "Customer not found." });
     }
-
-    res.status(200).json({ success: true, message: "Customer deleted successfully." });
+    return res.status(200).json({ success: true, message: "Customer deleted successfully." });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("deleteCustomer error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
-
-
-
-// 1️⃣ Get customer by ID
-async function getCustomer(customerId) {
-  const customer = await db.collection("customers").findOne({ _id: new ObjectId(customerId) });
-  if (!customer) throw new Error("Customer not found");
-  return customer;
-}
-
-// 2️⃣ Create customer if not exists
-async function createCustomerIfNotExists({ name, customer_type = "temporary" }) {
-
-  // Check if customer already exists
-  let customer = await db.collection("customers").findOne({ name });
-  if (customer) return customer;
-
-  // Create new customer
-  const newCustomer = {
-    _id: new ObjectId(),
-    name,
-    customer_type,
-    balance: 0,       // can be updated for partial payments
-    createdAt: new Date()
-  };
-
-  await db.collection("customers").insertOne(newCustomer);
-  return newCustomer;
-}
-
-// 3️⃣ Update customer balance
-async function updateCustomerBalance(customerId, amount) {
-
-  const customer = await db.collection("customers").findOne({ _id: new ObjectId(customerId) });
-  if (!customer) throw new Error("Customer not found");
-
-  const newBalance = (customer.balance || 0) + amount;
-
-  await db.collection("customers").updateOne(
-    { _id: new ObjectId(customerId) },
-    { $set: { balance: newBalance } }
-  );
-
-  return newBalance;
-}

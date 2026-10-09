@@ -8,85 +8,79 @@ const purchasesCol = db.collection("purchases");
 const productsCol = db.collection("products");
 const inventoryCol = db.collection("inventory");
 const suppliersCol = db.collection("suppliers");
-
-// Add with your collection declarations at the top:
 const purchaseReturnsCol = db.collection("purchase_returns");
 
+/**
+ * Standardized Pagination Helper
+ */
+function extractPagination(query) {
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 20));
+  const skip = (page - 1) * limit;
+  return { page, limit, skip };
+}
 
-// -------------------- GET PURCHASES --------------------
+// -------------------- GET PURCHASES (PAGINATED) --------------------
 async function getPurchases(req, res) {
-  console.log("hit getPurchases");
-
   try {
-    const { type } = req.query;
+    const { type, supplier_id } = req.query;
+    const { page, limit, skip } = extractPagination(req.query);
 
-    /* -----------------------------------------
-       FILTER: ONLY DUE PURCHASES (optional)
-       ?type=due
-    ----------------------------------------- */
-    const matchStage =
-      type === "due"
-        ? { payment_due: { $gt: 0 } }
-        : {};
+    const matchStage = {};
+    if (type === "due") {
+      matchStage.payment_due = { $gt: 0 };
+    }
+    if (supplier_id && ObjectId.isValid(supplier_id)) {
+      matchStage.supplier_id = new ObjectId(supplier_id);
+    }
 
-    /* -----------------------------------------
-       AGGREGATION PIPELINE
-    ----------------------------------------- */
-    const purchases = await purchasesCol.aggregate([
-      { $match: matchStage },
-
-      /* -------------------------------------
-         JOIN SUPPLIER COLLECTION
-      ------------------------------------- */
-      {
-        $lookup: {
-          from: "suppliers",
-          localField: "supplier_id",
-          foreignField: "_id",
-          as: "supplier"
-        }
-      },
-
-      /* -------------------------------------
-         FLATTEN SUPPLIER ARRAY
-      ------------------------------------- */
-      {
-        $unwind: {
-          path: "$supplier",
-          preserveNullAndEmptyArrays: true
-        }
-      },
-
-      /* -------------------------------------
-         SHAPE FINAL RESPONSE
-      ------------------------------------- */
-      {
-        $addFields: {
-          supplier_name: "$supplier.name"
-        }
-      },
-
-      /* -------------------------------------
-         REMOVE EXTRA DATA
-      ------------------------------------- */
-      {
-        $project: {
-          supplier: 0
-        }
-      },
-
-      /* -------------------------------------
-         SORT BY DATE
-      ------------------------------------- */
-      {
-        $sort: { date: -1 }
-      }
-    ]).toArray();
+    // Execute paginated fetch and count in parallel
+    const [purchases, totalRecords] = await Promise.all([
+      purchasesCol
+        .aggregate([
+          { $match: matchStage },
+          { $sort: { date: -1 } },
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $lookup: {
+              from: "suppliers",
+              localField: "supplier_id",
+              foreignField: "_id",
+              as: "supplier"
+            }
+          },
+          {
+            $unwind: {
+              path: "$supplier",
+              preserveNullAndEmptyArrays: true
+            }
+          },
+          {
+            $addFields: {
+              supplier_name: "$supplier.name"
+            }
+          },
+          {
+            $project: {
+              supplier: 0
+            }
+          }
+        ])
+        .toArray(),
+      purchasesCol.countDocuments(matchStage)
+    ]);
 
     res.status(200).json({
       success: true,
       count: purchases.length,
-      data: purchases
+      data: purchases,
+      pagination: {
+        total: totalRecords,
+        page,
+        limit,
+        totalPages: Math.ceil(totalRecords / limit)
+      }
     });
 
   } catch (err) {
@@ -98,13 +92,12 @@ async function getPurchases(req, res) {
   }
 }
 
-
-
-
+// -------------------- GET PURCHASE REPORT (FACETED & PAGINATED) --------------------
 async function getPurchaseReport(req, res) {
   try {
     const { type } = req.params;
     const { date, month, year, from, to, dueOnly } = req.query;
+    const { page, limit, skip } = extractPagination(req.query);
 
     let matchQuery = {};
 
@@ -117,8 +110,6 @@ async function getPurchaseReport(req, res) {
       start.setUTCHours(0, 0, 0, 0);
       const end = new Date(date);
       end.setUTCHours(23, 59, 59, 999);
-
-      console.log("daily", start, end);
       matchQuery.date = { $gte: start, $lte: end };
     }
 
@@ -131,8 +122,7 @@ async function getPurchaseReport(req, res) {
       if (!numMonth || !numYear) return res.status(400).json({ success: false, message: "Month and year are required" });
 
       const start = new Date(Date.UTC(numYear, numMonth - 1, 1, 0, 0, 0));
-      const end = new Date(Date.UTC(numYear, numMonth, 0, 23, 59, 59, 999)); // last day of month
-      console.log("monthly", start, end);
+      const end = new Date(Date.UTC(numYear, numMonth, 0, 23, 59, 59, 999));
       matchQuery.date = { $gte: start, $lte: end };
     }
 
@@ -145,7 +135,6 @@ async function getPurchaseReport(req, res) {
 
       const start = new Date(Date.UTC(numYear, 0, 1, 0, 0, 0));
       const end = new Date(Date.UTC(numYear, 11, 31, 23, 59, 59, 999));
-      console.log("yearly", start, end);
       matchQuery.date = { $gte: start, $lte: end };
     }
 
@@ -157,48 +146,89 @@ async function getPurchaseReport(req, res) {
 
       const start = new Date(from);
       start.setUTCHours(0, 0, 0, 0);
-
       const end = new Date(to);
       end.setUTCHours(23, 59, 59, 999);
-
-      console.log("custom", start, end);
       matchQuery.date = { $gte: start, $lte: end };
     }
 
     else return res.status(400).json({ success: false, message: "Invalid report type" });
 
-    /* ------------------------------
-       ONLY DUE PURCHASES
-    ------------------------------ */
     if (dueOnly === "true") matchQuery.payment_due = { $gt: 0 };
 
     /* ------------------------------
-       FETCH PURCHASES
+       FACETED AGGREGATION: DATABASE-LEVEL SUMMARY + PAGINATED ROWS
     ------------------------------ */
-    const purchases = await purchasesCol.find(matchQuery).sort({ date: -1 }).toArray();
+    const reportAggregation = await purchasesCol.aggregate([
+      { $match: matchQuery },
+      {
+        $facet: {
+          summary: [
+            {
+              $group: {
+                _id: null,
+                totalAmount: { $sum: "$total_amount" },
+                totalPaid: { $sum: "$paid_amount" },
+                totalDue: { $sum: "$payment_due" },
+                count: { $sum: 1 }
+              }
+            }
+          ],
+          paginatedData: [
+            { $sort: { date: -1 } },
+            { $skip: skip },
+            { $limit: limit },
+            {
+              $lookup: {
+                from: "suppliers",
+                localField: "supplier_id",
+                foreignField: "_id",
+                as: "supplier"
+              }
+            },
+            {
+              $unwind: {
+                path: "$supplier",
+                preserveNullAndEmptyArrays: true
+              }
+            },
+            {
+              $addFields: {
+                supplier_name: "$supplier.name"
+              }
+            },
+            {
+              $project: {
+                supplier: 0
+              }
+            }
+          ]
+        }
+      }
+    ]).toArray();
 
-    /* ------------------------------
-       NORMALIZE DATES
-    ------------------------------ */
-    const normalizedPurchases = purchases.map(p => ({
-      ...p,
-      date: p.date ? p.date.toISOString() : null,
-      last_payment_date: p.last_payment_date ? p.last_payment_date.toISOString() : null,
-      updated_at: p.updated_at ? p.updated_at.toISOString() : null,
-    }));
-
-    /* ------------------------------
-       SUMMARY
-    ------------------------------ */
-    const totalAmount = normalizedPurchases.reduce((sum, p) => sum + (p.total_amount || 0), 0);
-    const totalPaid = normalizedPurchases.reduce((sum, p) => sum + (p.paid_amount || 0), 0);
-    const totalDue = normalizedPurchases.reduce((sum, p) => sum + (p.payment_due || 0), 0);
+    const summaryData = reportAggregation[0].summary[0] || {
+      totalAmount: 0,
+      totalPaid: 0,
+      totalDue: 0,
+      count: 0
+    };
+    const purchasesData = reportAggregation[0].paginatedData;
 
     res.status(200).json({
       success: true,
-      count: normalizedPurchases.length,
-      summary: { totalAmount, totalPaid, totalDue },
-      data: normalizedPurchases,
+      count: purchasesData.length,
+      summary: {
+        totalAmount: summaryData.totalAmount,
+        totalPaid: summaryData.totalPaid,
+        totalDue: summaryData.totalDue,
+      },
+      data: purchasesData,
+      pagination: {
+        total: summaryData.count,
+        page,
+        limit,
+        totalPages: Math.ceil(summaryData.count / limit)
+      }
     });
 
   } catch (err) {
@@ -207,13 +237,12 @@ async function getPurchaseReport(req, res) {
   }
 }
 
-
-
-
 // -------------------- GET SINGLE PURCHASE --------------------
 async function getPurchaseById(req, res) {
   const purchase_id = req.params.id;
-  if (!purchase_id) return res.json({ success: false, message: 'purchase id not found' });
+  if (!purchase_id || !ObjectId.isValid(purchase_id)) {
+    return res.status(400).json({ success: false, message: 'Valid purchase ID required' });
+  }
   try {
     const purchase = await purchasesCol.findOne({ _id: new ObjectId(purchase_id) });
     if (!purchase) return res.status(404).json({ success: false, message: "Purchase not found" });
@@ -223,32 +252,47 @@ async function getPurchaseById(req, res) {
   }
 }
 
+// -------------------- GET PURCHASES BY SUPPLIER (PAGINATED) --------------------
 async function getPurchasesBySupplierId(req, res) {
   const { supplierId } = req.params;
-  if (!supplierId) return res.json({ success: false, message: 'Supplier id not found' });
+  if (!supplierId || !ObjectId.isValid(supplierId)) {
+    return res.status(400).json({ success: false, message: 'Valid Supplier ID required' });
+  }
   try {
-    const purchases = await purchasesCol.find({
-      supplier_id: new ObjectId(supplierId)
-    }).toArray();
-    res.status(200).json({ success: true, data: purchases });
+    const { page, limit, skip } = extractPagination(req.query);
+    const filter = { supplier_id: new ObjectId(supplierId) };
+
+    const [purchases, totalRecords] = await Promise.all([
+      purchasesCol.find(filter).sort({ date: -1 }).skip(skip).limit(limit).toArray(),
+      purchasesCol.countDocuments(filter)
+    ]);
+
+    res.status(200).json({
+      success: true,
+      count: purchases.length,
+      data: purchases,
+      pagination: {
+        total: totalRecords,
+        page,
+        limit,
+        totalPages: Math.ceil(totalRecords / limit)
+      }
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 }
 
-
+// -------------------- CREATE PURCHASE --------------------
 async function createPurchase(req, res) {
   const session = client.startSession();
 
   try {
     const { products, total_amount, paid_amount = 0, payment_method = "cash", account_id, supplier_id, date } = req.body;
-    console.log(req.body);
     if (!products || !products.length) return res.status(400).json({ success: false, message: "Products array cannot be empty" });
     if (paid_amount > 0 && !account_id) return res.status(400).json({ success: false, message: "Account selection is required for payment" });
     if (!date) return res.status(400).json({ success: false, message: "Date is invalid." });
-    // return res.status(400).json({ success: false, message: "Date is invalddddddid." });
 
-    // Parse date properly
     let purchaseDate;
     if (date) {
       purchaseDate = new Date(date);
@@ -256,7 +300,7 @@ async function createPurchase(req, res) {
         return res.status(400).json({ success: false, message: "Invalid date format" });
       }
     } else {
-      purchaseDate = new Date(); // default to current date and time
+      purchaseDate = new Date();
     }
 
     const invoice_id = new ObjectId();
@@ -264,7 +308,6 @@ async function createPurchase(req, res) {
 
     await session.startTransaction();
 
-    // Insert purchase
     await purchasesCol.insertOne({
       _id: invoice_id,
       supplier_id: supplier_id ? new ObjectId(supplier_id) : null,
@@ -277,7 +320,6 @@ async function createPurchase(req, res) {
       date: purchaseDate,
     }, { session });
 
-    // Handle payment (debit account)
     if (paid_amount > 0) {
       const paymentResult = await updateAccountBalance({
         client,
@@ -291,17 +333,14 @@ async function createPurchase(req, res) {
       if (!paymentResult.success) throw new Error(paymentResult.message);
     }
 
-    // Update inventory
     for (const product of products) {
       const result = await addToInventory(product, invoice_id, session);
-      console.log('inventory result', result);
       if (!result.success) throw new Error(result.message);
     }
 
-    // Update supplier
     if (supplier_id) {
       const supplierObjId = new ObjectId(supplier_id);
-      const balanceDiff = total_amount - paid_amount; // positive due or negative advance
+      const balanceDiff = total_amount - paid_amount;
       const advanceDiff = paid_amount > total_amount ? paid_amount - total_amount : 0;
       const dueDiff = balanceDiff > 0 ? balanceDiff : 0;
 
@@ -339,34 +378,21 @@ async function createPurchase(req, res) {
   }
 }
 
-
+// -------------------- UPDATE PURCHASE --------------------
 async function updatePurchase(req, res) {
   const session = client.startSession();
 
   try {
-    console.log("====================================");
-    console.log("🚀 UPDATE PURCHASE START");
-    console.log("====================================");
-
-    console.log("📥 Params ID:", req.params.id);
-    console.log("📥 Payload:", JSON.stringify(req.body, null, 2));
-
     const purchaseId = normalizeIdV2(req.params.id, "purchaseId");
     const payload = req.body;
 
     await session.startTransaction();
-    console.log("✅ Transaction started");
 
-    /* -------------------------------------------------- */
     /* 1️⃣ FETCH EXISTING PURCHASE */
-    /* -------------------------------------------------- */
-
     const existingPurchase = await purchasesCol.findOne(
       { _id: purchaseId },
       { session }
     );
-
-    console.log("📄 Existing Purchase Found:", !!existingPurchase);
 
     if (!existingPurchase) {
       await session.abortTransaction();
@@ -376,13 +402,8 @@ async function updatePurchase(req, res) {
       });
     }
 
-    /* -------------------------------------------------- */
     /* 2️⃣ REVERT OLD INVENTORY */
-    /* -------------------------------------------------- */
-
     for (const oldProd of existingPurchase.products) {
-      console.log("🔄 Reverting product:", oldProd);
-
       const productId = normalizeIdV2(oldProd.product_id, "old product_id");
 
       await inventoryCol.updateOne(
@@ -399,17 +420,12 @@ async function updatePurchase(req, res) {
       await recalculateAveragePurchasePrice(productId, session);
     }
 
-    /* -------------------------------------------------- */
     /* 3️⃣ APPLY NEW INVENTORY */
-    /* -------------------------------------------------- */
-
     if (!Array.isArray(payload.products) || payload.products.length === 0) {
       throw new Error("Products array is empty or invalid");
     }
 
     for (const newProd of payload.products) {
-      console.log("➕ Applying product:", newProd);
-
       const productId = normalizeIdV2(newProd.product_id, "new product_id");
 
       const purchaseRecord = {
@@ -432,16 +448,11 @@ async function updatePurchase(req, res) {
       await recalculateAveragePurchasePrice(productId, session);
     }
 
-    /* -------------------------------------------------- */
     /* 4️⃣ ACCOUNT BALANCE */
-    /* -------------------------------------------------- */
-
     const oldPaid = existingPurchase.paid_amount || 0;
     const newPaid = payload.paid_amount || 0;
 
     if (oldPaid > 0 && existingPurchase.account_id) {
-      console.log("🔄 Reverting old payment");
-
       await updateAccountBalance({
         client,
         db,
@@ -454,8 +465,6 @@ async function updatePurchase(req, res) {
     }
 
     if (newPaid > 0 && payload.account_id) {
-      console.log("💸 Applying new payment");
-
       const accountId = normalizeIdV2(payload.account_id, "account_id");
 
       await updateAccountBalance({
@@ -469,11 +478,7 @@ async function updatePurchase(req, res) {
       });
     }
 
-    /* -------------------------------------------------- */
     /* 5️⃣ SUPPLIER UPDATE */
-    /* -------------------------------------------------- */
-
-    const suppliersCol = db.collection("suppliers");
     const supplierId = normalizeIdV2(payload.supplier_id, "supplier_id");
 
     const oldTotal = existingPurchase.total_amount;
@@ -501,10 +506,7 @@ async function updatePurchase(req, res) {
       { session }
     );
 
-    /* -------------------------------------------------- */
     /* 6️⃣ SUPPLIER HISTORY */
-    /* -------------------------------------------------- */
-
     await suppliersCol.updateOne(
       {
         _id: supplierId,
@@ -523,10 +525,7 @@ async function updatePurchase(req, res) {
       { session }
     );
 
-    /* -------------------------------------------------- */
     /* 7️⃣ UPDATE PURCHASE DOCUMENT */
-    /* -------------------------------------------------- */
-
     let purchaseDate = new Date();
     if (payload.date) {
       const parsedDate = new Date(payload.date);
@@ -556,10 +555,6 @@ async function updatePurchase(req, res) {
       { session }
     );
 
-    /* -------------------------------------------------- */
-    /* ✅ COMMIT */
-    /* -------------------------------------------------- */
-
     await session.commitTransaction();
 
     res.status(200).json({
@@ -568,7 +563,7 @@ async function updatePurchase(req, res) {
     });
 
   } catch (error) {
-    console.error("❌ ERROR:", error.message);
+    console.error("Update purchase error:", error.message);
     await session.abortTransaction();
 
     res.status(500).json({
@@ -578,198 +573,57 @@ async function updatePurchase(req, res) {
 
   } finally {
     await session.endSession();
-    console.log("🧹 Session ended");
   }
 }
 
-
-/**
- * =====================================================
- * UPDATE ALL PRODUCT PURCHASE PRICES
- * =====================================================
- *
- * Purpose:
- * - Sync all product purchase prices
- * - Read average_purchase_price from inventory
- * - Update products collection
- *
- * Trigger:
- * Frontend button:
- * "Update All Product Prices"
- *
- * API Example:
- * PATCH /api/products/update-all-prices
- *
- * =====================================================
- */
-
-async function updateAllProductPrices(
-  req,
-  res
-) {
-  const session =
-    client.startSession();
+// -------------------- UPDATE ALL PRODUCT PURCHASE PRICES --------------------
+async function updateAllProductPrices(req, res) {
+  const session = client.startSession();
 
   try {
-    console.log("====================================");
-    console.log(
-      "🚀 UPDATE ALL PRODUCT PRICES START"
-    );
-    console.log("====================================");
-
-    /* ---------------------------------- */
-    /* 1️⃣ START TRANSACTION */
-    /* ---------------------------------- */
-
     await session.startTransaction();
 
-    console.log(
-      "✅ Transaction Started"
-    );
-
-    /* ---------------------------------- */
-    /* 3️⃣ GET ALL PRODUCTS */
-    /* ---------------------------------- */
-
-    const products =
-      await productsCol
-        .find({}, { session })
-        .toArray();
-
-    console.log(
-      `📦 Total Products Found: ${products.length}`
-    );
+    const products = await productsCol.find({}, { session }).toArray();
 
     if (!products.length) {
       await session.abortTransaction();
-
       return res.status(404).json({
         success: false,
-        message:
-          "No products found",
+        message: "No products found",
       });
     }
 
-    /* ---------------------------------- */
-    /* 4️⃣ GET ALL INVENTORY DATA */
-    /* ---------------------------------- */
-    /**
-     * We fetch inventory once
-     * for better performance
-     */
-
-    const inventories =
-      await inventoryCol
-        .find({}, { session })
-        .toArray();
-
-    console.log(
-      `📊 Total Inventory Found: ${inventories.length}`
-    );
-
-    /* ---------------------------------- */
-    /* 5️⃣ CREATE INVENTORY MAP */
-    /* ---------------------------------- */
-    /**
-     * Convert inventory array
-     * into fast lookup object
-     *
-     * Key:
-     * product_id
-     */
-
-    const inventoryMap =
-      new Map();
+    const inventories = await inventoryCol.find({}, { session }).toArray();
+    const inventoryMap = new Map();
 
     for (const inv of inventories) {
-      inventoryMap.set(
-        inv.product_id.toString(),
-        inv
-      );
+      inventoryMap.set(inv.product_id.toString(), inv);
     }
 
-    /* ---------------------------------- */
-    /* 6️⃣ PREPARE BULK UPDATE */
-    /* ---------------------------------- */
-
     const bulkUpdates = [];
-
     let updatedCount = 0;
     let skippedCount = 0;
 
     for (const product of products) {
-      const productId =
-        product._id.toString();
-
-      /* ---------------------------------- */
-      /* FIND MATCHING INVENTORY */
-      /* ---------------------------------- */
-
-      const inventory =
-        inventoryMap.get(
-          productId
-        );
+      const productId = product._id.toString();
+      const inventory = inventoryMap.get(productId);
 
       if (!inventory) {
-        console.log(
-          `⚠️ Inventory not found for Product: ${product.item_name}`
-        );
-
         skippedCount++;
-
         continue;
       }
 
-      /* ---------------------------------- */
-      /* GET PRICES */
-      /* ---------------------------------- */
-
-      const averagePurchasePrice =
-        Number(
-          inventory.average_purchase_price ||
-          0
-        );
-
-      const lastPurchasePrice =
-        Number(
-          inventory.last_purchase_price ||
-          0
-        );
-
-      console.log(
-        `💰 Updating: ${product.item_name}`
-      );
-
-      console.log(
-        `Average Price: ${averagePurchasePrice}`
-      );
-
-      /* ---------------------------------- */
-      /* BULK UPDATE OBJECT */
-      /* ---------------------------------- */
+      const averagePurchasePrice = Number(inventory.average_purchase_price || 0);
+      const lastPurchasePrice = Number(inventory.last_purchase_price || 0);
 
       bulkUpdates.push({
         updateOne: {
-          filter: {
-            _id: product._id,
-          },
-
+          filter: { _id: product._id },
           update: {
             $set: {
-              /**
-               * Main purchase price
-               */
-              price:
-                averagePurchasePrice,
-
-              last_purchase_price:
-                lastPurchasePrice,
-
-              /**
-               * Last update time
-               */
-              updated_at:
-                new Date(),
+              price: averagePurchasePrice,
+              last_purchase_price: lastPurchasePrice,
+              updated_at: new Date(),
             },
           },
         },
@@ -778,95 +632,38 @@ async function updateAllProductPrices(
       updatedCount++;
     }
 
-    /* ---------------------------------- */
-    /* 7️⃣ EXECUTE BULK UPDATE */
-    /* ---------------------------------- */
-
     if (bulkUpdates.length > 0) {
-      const bulkResult =
-        await productsCol.bulkWrite(
-          bulkUpdates,
-          { session }
-        );
-
-      console.log(
-        "✅ Bulk Update Done"
-      );
-
-      console.log(
-        "Modified Count:",
-        bulkResult.modifiedCount
-      );
+      await productsCol.bulkWrite(bulkUpdates, { session });
     }
-
-    /* ---------------------------------- */
-    /* 8️⃣ COMMIT TRANSACTION */
-    /* ---------------------------------- */
 
     await session.commitTransaction();
 
-    console.log(
-      "✅ Transaction Committed"
-    );
-
-    console.log("====================================");
-    console.log(
-      "✅ UPDATE ALL PRODUCT PRICES END"
-    );
-    console.log("====================================");
-
-    /* ---------------------------------- */
-    /* 9️⃣ RESPONSE */
-    /* ---------------------------------- */
-
     res.status(200).json({
       success: true,
-      message:
-        "All product prices updated successfully",
-
+      message: "All product prices updated successfully",
       summary: {
-        total_products:
-          products.length,
-
-        updated:
-          updatedCount,
-
-        skipped:
-          skippedCount,
+        total_products: products.length,
+        updated: updatedCount,
+        skipped: skippedCount,
       },
     });
   } catch (error) {
-    console.error(
-      "❌ ERROR:",
-      error.message
-    );
-
+    console.error("updateAllProductPrices error:", error.message);
     await session.abortTransaction();
-
     res.status(500).json({
       success: false,
-      message:
-        error.message,
+      message: error.message,
     });
   } finally {
     await session.endSession();
-
-    console.log(
-      "🧹 Session Ended"
-    );
   }
 }
 
-
-
-/* ======================
-   CONTROLLER: paySupplierDue (unified accounts)
-   ====================== */
+// -------------------- PAY SUPPLIER DUE --------------------
 async function paySupplierDue(req, res) {
   const purchaseId = new ObjectId(req.params.id);
   const { payAmount, paymentAccountId } = req.body;
 
-  console.log("paySupplierDue", purchaseId, req.body);
   if (!payAmount || payAmount <= 0) return res.status(400).json({ success: false, message: "Invalid payment amount" });
   if (!paymentAccountId) return res.status(400).json({ success: false, message: "Payment account is required" });
 
@@ -878,9 +675,6 @@ async function paySupplierDue(req, res) {
     const total = Number(purchase.total_amount || 0);
     const due = total - oldPaid;
 
-    // if (payAmount > due) return res.status(400).json({ success: false, message: "Payment exceeds due amount" });
-
-    // Debit account
     const paymentResult = await updateAccountBalance({
       client,
       db,
@@ -890,17 +684,15 @@ async function paySupplierDue(req, res) {
       accountId: paymentAccountId,
       details: { invoiceId: purchaseId, remarks: `Supplier due payment for purchase ${purchaseId}` }
     });
-    console.log("paymentResult", paymentResult);
     if (!paymentResult.success) return res.status(400).json(paymentResult);
 
-    // Update purchase payment
     const updatedPaid = oldPaid + payAmount;
     const newDue = total - updatedPaid;
 
     await purchasesCol.updateOne(
       { _id: purchaseId },
       {
-        $set: { paid_amount: updatedPaid, payment_due: newDue, paymentAccountId, last_payment_date: new Date(), },
+        $set: { paid_amount: updatedPaid, payment_due: newDue, paymentAccountId, last_payment_date: new Date() },
         $push: {
           payment_history: {
             date: new Date(),
@@ -913,7 +705,6 @@ async function paySupplierDue(req, res) {
       }
     );
 
-    // Update supplier balances
     if (purchase.supplier_id) {
       const supplierId = new ObjectId(purchase.supplier_id);
       await suppliersCol.updateOne(
@@ -946,77 +737,32 @@ async function paySupplierDue(req, res) {
   }
 }
 
-
+// -------------------- DELETE PURCHASE --------------------
 async function deletePurchase(req, res) {
   const session = client.startSession();
 
   try {
-    console.log("🟢 DELETE PURCHASE HIT");
-    console.log("📥 Params ID:", req.params.id);
-
-    // 1️⃣ Validate purchaseId
     let purchaseId;
     try {
       purchaseId = new ObjectId(req.params.id);
-      console.log("🆔 Converted purchaseId:", purchaseId);
     } catch (e) {
-      console.log("❌ INVALID PURCHASE ID:", req.params.id);
       throw new Error("Invalid purchase ID format");
     }
 
-    // 2️⃣ Fetch purchase
-    console.log("🔍 Fetching purchase...");
     const existingPurchase = await purchasesCol.findOne({ _id: purchaseId });
-
-    console.log("📄 Purchase found:", existingPurchase ? "YES" : "NO");
-    console.log("📦 Products count:", existingPurchase?.products?.length);
-
     if (!existingPurchase) {
-      console.log("❌ No purchase found in DB");
       return res.status(404).json({ success: false, message: "Purchase not found" });
     }
 
     await session.startTransaction();
-    console.log("🔓 Transaction started");
 
-    // 3️⃣ Inventory rollback
-    console.log("🔁 Starting inventory rollback");
-
-    for (const [index, item] of existingPurchase.products.entries()) {
-      console.log(`\n➡️ ITEM ${index + 1}`);
-      console.log("Raw item:", item);
-
-      console.log("📦 item.product_id:", item.product_id);
-      console.log("📦 item.qty:", item.qty);
-
-      // ObjectId test
-      // let productObjId;
-      try {
-        const productIdStr = extractProductId(item.product_id);
-
-        if (!productIdStr) {
-          console.log("❌ Cannot extract product id:", item.product_id);
-          continue;
-        }
-
-        const productObjId = new ObjectId(productIdStr);
-
-        // productObjId = new ObjectId(item.product_id);
-        console.log("🆔 product ObjectId OK:", productObjId);
-      } catch (e) {
-        console.log("❌ INVALID product_id (NOT ObjectId):", item.product_id);
-      }
-
+    for (const item of existingPurchase.products) {
       const productIdStr = extractProductId(item.product_id);
-
-      if (!productIdStr) {
-        console.log("❌ Skipping invalid product_id:", item.product_id);
-        continue;
-      }
+      if (!productIdStr) continue;
 
       const productObjId = new ObjectId(productIdStr);
 
-      const updateResult = await inventoryCol.updateOne(
+      await inventoryCol.updateOne(
         { product_id: productObjId },
         {
           $inc: { stock_qty: -item.qty },
@@ -1027,21 +773,10 @@ async function deletePurchase(req, res) {
         { session }
       );
 
-      console.log("📊 Inventory update result:", updateResult);
-
-      // avg recalculation debug
-      console.log("🔄 Calling avg recalculation for:", item.product_id);
       await recalculateAveragePurchasePrice(item.product_id, session);
-      console.log("✅ Avg recalculation done");
     }
 
-    // 4️⃣ Payment rollback
-    console.log("💰 Paid amount:", existingPurchase.paid_amount);
-    console.log("🏦 Account ID:", existingPurchase.account_id);
-
     if (existingPurchase.paid_amount > 0 && existingPurchase.account_id) {
-      console.log("🔁 Reverting payment...");
-
       const revertResult = await updateAccountBalance({
         client,
         db,
@@ -1052,28 +787,18 @@ async function deletePurchase(req, res) {
         details: { invoiceId: purchaseId, remarks: "Revert payment on delete" }
       });
 
-      console.log("💳 Payment revert result:", revertResult);
-
       if (!revertResult.success) throw new Error(revertResult.message);
     }
 
-    // 5️⃣ Supplier update
-    console.log("🏭 Supplier ID:", existingPurchase.supplier_id);
-
     if (existingPurchase.supplier_id) {
       const supplierObjId = new ObjectId(existingPurchase.supplier_id);
-
       const balanceDiff = existingPurchase.total_amount - existingPurchase.paid_amount;
       const advanceDiff = existingPurchase.paid_amount > existingPurchase.total_amount
         ? existingPurchase.paid_amount - existingPurchase.total_amount
         : 0;
       const dueDiff = balanceDiff > 0 ? balanceDiff : 0;
 
-      console.log("📊 balanceDiff:", balanceDiff);
-      console.log("📊 dueDiff:", dueDiff);
-      console.log("📊 advanceDiff:", advanceDiff);
-
-      const supplierUpdate = await suppliersCol.updateOne(
+      await suppliersCol.updateOne(
         { _id: supplierObjId },
         {
           $inc: {
@@ -1098,22 +823,10 @@ async function deletePurchase(req, res) {
         },
         { session }
       );
-
-      console.log("🏭 Supplier update result:", supplierUpdate);
     }
 
-    // 6️⃣ Delete purchase
-    console.log("🗑️ Deleting purchase...");
-
-    const deleteResult = await purchasesCol.deleteOne(
-      { _id: purchaseId },
-      { session }
-    );
-
-    console.log("🗑️ Delete result:", deleteResult);
-
+    await purchasesCol.deleteOne({ _id: purchaseId }, { session });
     await session.commitTransaction();
-    console.log("✅ Transaction committed");
 
     return res.status(200).json({
       success: true,
@@ -1121,24 +834,16 @@ async function deletePurchase(req, res) {
     });
 
   } catch (err) {
-    console.log("❌ ERROR OCCURRED");
-    console.log("Message:", err.message);
-    console.log("Stack:", err.stack);
-
     await session.abortTransaction();
     return res.status(500).json({ success: false, message: err.message });
-
   } finally {
     await session.endSession();
-    console.log("🔚 Session ended");
   }
 }
 
-
-
+// -------------------- PAY SUPPLIER DUE MANUALLY (FIFO) --------------------
 async function paySupplierDueManually(req, res) {
   const session = client.startSession();
-  console.log('hit paySupplierDueManually');
   try {
     const { paidAmount, paymentAccountId, supplierId } = req.body;
 
@@ -1155,21 +860,14 @@ async function paySupplierDueManually(req, res) {
 
     let remainingAmount = Number(paidAmount);
 
-    /* --------------------------------------------------
-    1️⃣ Fetch supplier due purchases (oldest first)
-    -------------------------------------------------- */
     const purchases = await purchasesCol
       .find({
         supplier_id: new ObjectId(supplierId),
-        $expr: { $gt: ["$total_amount", "$paid_amount"] }
+        $expr: {$gt: ["$total_amount", "$paid_amount"] }
       })
       .sort({ date: 1 })
       .toArray();
 
-    // return console.log("paySupplierDueManually", purchases);
-    /* --------------------------------------------------
-       2️⃣ Pay purchases step-by-step
-    -------------------------------------------------- */
     for (const purchase of purchases) {
       if (remainingAmount <= 0) break;
 
@@ -1181,7 +879,6 @@ async function paySupplierDueManually(req, res) {
 
       const payNow = Math.min(due, remainingAmount);
 
-      /* ---- Debit account ---- */
       const paymentResult = await updateAccountBalance({
         client,
         db,
@@ -1196,24 +893,15 @@ async function paySupplierDueManually(req, res) {
         session
       });
 
-      console.log("purchase paymentResult", paymentResult);
-
       if (!paymentResult.success) throw new Error(paymentResult.message);
 
       const newPaid = paid + payNow;
       const newDue = total - newPaid;
 
-      /* ---- Update purchase ---- */
       await purchasesCol.updateOne(
         { _id: purchase._id },
         {
-          $set: {
-            paid_amount: newPaid,
-            payment_due: newDue,
-            paymentAccountId,
-            last_payment_date: new Date()
-          },
-          $push: {
+          $set: {             paid_amount: newPaid,             payment_due: newDue,             paymentAccountId,             last_payment_date: new Date()           },$push: {
             payment_history: {
               date: new Date(),
               paymentAccountId,
@@ -1226,13 +914,11 @@ async function paySupplierDueManually(req, res) {
         { session }
       );
 
-      /* ---- Update supplier ledger ---- */
       await suppliersCol.updateOne(
         { _id: new ObjectId(supplierId) },
         {
           $inc: { due: -payNow },
-          $set: { last_payment_date: new Date() },
-          $push: {
+          $set: { last_payment_date: new Date() },$push: {
             supplier_history: {
               date: new Date(),
               type: "payment",
@@ -1251,11 +937,7 @@ async function paySupplierDueManually(req, res) {
       remainingAmount -= payNow;
     }
 
-    /* --------------------------------------------------
-       3️⃣ Remaining amount → supplier advance
-    -------------------------------------------------- */
     if (remainingAmount > 0) {
-
       const paymentResult = await updateAccountBalance({
         client,
         db,
@@ -1269,10 +951,7 @@ async function paySupplierDueManually(req, res) {
         session
       });
 
-      console.log("purchase paymentResult", paymentResult);
-
       if (!paymentResult.success) throw new Error(paymentResult.message);
-
 
       await suppliersCol.updateOne(
         { _id: new ObjectId(supplierId) },
@@ -1283,9 +962,6 @@ async function paySupplierDueManually(req, res) {
       );
     }
 
-    /* --------------------------------------------------
-       ✅ Commit Transaction
-    -------------------------------------------------- */
     await session.commitTransaction();
 
     return res.status(200).json({
@@ -1305,195 +981,126 @@ async function paySupplierDueManually(req, res) {
   } finally {
     await session.endSession();
   }
-};
+}
 
-async function getProductWisePurchaseRecord(
-  req,
-  res
-) {
-  console.log(
-    "hit /product-purchases"
-  );
-
+// -------------------- PRODUCT-WISE PURCHASE RECORDS (PAGINATED) --------------------
+async function getProductWisePurchaseRecord(req, res) {
   try {
-    const result =
-      await purchasesCol
-        .aggregate([
-          // join supplier
-          {
-            $lookup: {
-              from: "suppliers",
-              localField:
-                "supplier_id",
-              foreignField:
-                "_id",
-              as: "supplier",
+    const { page, limit, skip } = extractPagination(req.query);
+
+    // 1. Get total distinct products to compute totalPages
+    const distinctProductsResult = await purchasesCol.aggregate([
+      { $unwind: "$products" },
+      { $group: { _id: "$products.product_id" } },
+      { $count: "totalDistinct" }
+    ]).toArray();
+
+    const totalRecords = distinctProductsResult.length > 0 ? distinctProductsResult[0].totalDistinct : 0;
+
+    // 2. Aggregate paginated groups
+    const result = await purchasesCol
+      .aggregate([
+        {
+          $lookup: {
+            from: "suppliers",
+            localField: "supplier_id",
+            foreignField: "_id",
+            as: "supplier",
+          },
+        },
+        {
+          $unwind: {
+            path: "$supplier",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $unwind: "$products",
+        },
+        {
+          $group: {
+            _id: "$products.product_id",
+            product_name: {
+              $first: "$products.name",
             },
-          },
-
-          {
-            $unwind: {
-              path: "$supplier",
-              preserveNullAndEmptyArrays: true,
+            total_qty: {
+              $sum: "$products.qty",
             },
-          },
-
-          // flatten products array
-          {
-            $unwind:
-              "$products",
-          },
-
-          // group by product
-          {
-            $group: {
-              _id:
-                "$products.product_id",
-
-              product_name: {
-                $first:
-                  "$products.name",
-              },
-
-              total_qty: {
-                $sum:
-                  "$products.qty",
-              },
-
-              total_purchase_amount:
-              {
-                $sum:
-                  "$products.subtotal",
-              },
-
-              avg_purchase_price:
-              {
-                $avg:
-                  "$products.purchase_price",
-              },
-
-              total_purchase_count:
-              {
-                $sum: 1,
-              },
-
-              purchases: {
-                $push: {
-                  _id: {
-                    $toString:
-                      "$_id",
-                  },
-
-                  supplier_id:
-                  {
-                    $toString:
-                      "$supplier_id",
-                  },
-
-                  supplier_name:
-                    "$supplier.name",
-
-                  qty: "$products.qty",
-
-                  purchase_price:
-                    "$products.purchase_price",
-
-                  subtotal:
-                    "$products.subtotal",
-
-                  payment_method:
-                    "$payment_method",
-
-                  paid_amount:
-                    "$paid_amount",
-
-                  payment_due:
-                    "$payment_due",
-
-                  date:
-                    "$date",
-                },
-              },
-
-              // latest purchase
-              last_purchase_date:
-              {
-                $max:
-                  "$date",
+            total_purchase_amount: {
+              $sum: "$products.subtotal",
+            },
+            avg_purchase_price: {
+              $avg: "$products.purchase_price",
+            },
+            total_purchase_count: {
+              $sum: 1,
+            },
+            last_purchase_date: {
+              $max: "$date",
+            },
+            purchases: {
+              $push: {
+                _id: { $toString: "$_id" },
+                supplier_id: { $toString: "$supplier_id" },
+                supplier_name: "$supplier.name",
+                qty: "$products.qty",
+                purchase_price: "$products.purchase_price",
+                subtotal: "$products.subtotal",
+                payment_method: "$payment_method",
+                paid_amount: "$paid_amount",
+                payment_due: "$payment_due",
+                date: "$date",
               },
             },
           },
-
-          // optional sorting
-          {
-            $sort: {
-              last_purchase_date:
-                -1,
+        },
+        {
+          $sort: {             last_purchase_date: -1,           },         },         {$skip: skip },
+        { $limit: limit },
+        {
+          $project: {
+            _id: 0,
+            product_id: "$_id",
+            product_name: 1,
+            total_qty: 1,
+            total_purchase_amount: 1,
+            avg_purchase_price: {
+              $round: ["$avg_purchase_price", 2],
             },
+            total_purchase_count: 1,
+            last_purchase_date: 1,
+            purchases: 1,
           },
-
-          // final shape
-          {
-            $project: {
-              _id: 0,
-
-              product_id:
-                "$_id",
-
-              product_name: 1,
-
-              total_qty: 1,
-
-              total_purchase_amount: 1,
-
-              avg_purchase_price:
-              {
-                $round: [
-                  "$avg_purchase_price",
-                  2,
-                ],
-              },
-
-              total_purchase_count: 1,
-
-              last_purchase_date: 1,
-
-              purchases: 1,
-            },
-          },
-        ])
-        .toArray();
+        },
+      ])
+      .toArray();
 
     return res.status(200).json({
       success: true,
       count: result.length,
       data: result,
+      pagination: {
+        total: totalRecords,
+        page,
+        limit,
+        totalPages: Math.ceil(totalRecords / limit)
+      }
     });
   } catch (error) {
     console.error(error);
-
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to get product-wise purchase records",
-      error:
-        error.message,
+      message: "Failed to get product-wise purchase records",
+      error: error.message,
     });
   }
 }
-
-
 
 // -------------------- CREATE PURCHASE RETURN --------------------
 async function createPurchaseReturn(req, res) {
   const session = client.startSession();
 
   try {
-    console.log("====================================");
-    console.log("🚀 CREATE PURCHASE RETURN START");
-    console.log("====================================");
-    console.log("📥 Payload:", JSON.stringify(req.body, null, 2));
-
     const {
       supplier_id,
       products,
@@ -1507,11 +1114,9 @@ async function createPurchaseReturn(req, res) {
       date
     } = req.body;
 
-    // Support both naming conventions
     const effectiveRefund = Number(refund_received ?? refund_amount ?? 0);
     const effectiveAccountId = account_id || paymentAccountId;
 
-    // 1️⃣ Validations
     if (!supplier_id) {
       return res.status(400).json({ success: false, message: "Supplier ID is required" });
     }
@@ -1536,29 +1141,21 @@ async function createPurchaseReturn(req, res) {
     const returnAmount = Number(total_return_amount || 0);
 
     await session.startTransaction();
-    console.log("✅ Transaction started");
 
-    // 2️⃣ Verify Supplier
     const supplier = await suppliersCol.findOne({ _id: supplierId }, { session });
     if (!supplier) {
       await session.abortTransaction();
       return res.status(404).json({ success: false, message: "Supplier not found" });
     }
 
-    // 3️⃣ Deduct Returned Products from Inventory
     for (const item of products) {
       const productIdStr = extractProductId(item.product_id);
-      if (!productIdStr) {
-        console.log("⚠️ Skipping invalid product_id:", item.product_id);
-        continue;
-      }
+      if (!productIdStr) continue;
 
       const productObjId = new ObjectId(productIdStr);
       const returnQty = Number(item.qty || 0);
       const returnPrice = Number(item.return_price || item.purchase_price || 0);
       const subtotal = Number(item.subtotal || returnQty * returnPrice);
-
-      console.log(`📦 Deducting inventory for product: ${item.name || productIdStr}, Qty: ${returnQty}`);
 
       await inventoryCol.updateOne(
         { product_id: productObjId },
@@ -1580,7 +1177,6 @@ async function createPurchaseReturn(req, res) {
       await recalculateAveragePurchasePrice(productObjId, session);
     }
 
-    // 4️⃣ Credit Refund to Selected Payment Account (Consistent with createPurchase without passing session)
     if (effectiveRefund > 0 && effectiveAccountId) {
       const accountObjId = normalizeIdV2(effectiveAccountId, "account_id");
 
@@ -1588,7 +1184,7 @@ async function createPurchaseReturn(req, res) {
         client,
         db,
         amount: effectiveRefund,
-        transactionType: "credit", // money received back into our account
+        transactionType: "credit",
         entrySource: "purchase_return",
         accountId: accountObjId.toString(),
         details: {
@@ -1598,11 +1194,9 @@ async function createPurchaseReturn(req, res) {
         }
       });
 
-      console.log("💳 Refund account balance update result:", paymentResult);
       if (!paymentResult.success) throw new Error(paymentResult.message);
     }
 
-    // 5️⃣ Update Supplier Balances & Ledger History
     const netReturnCredit = returnAmount - effectiveRefund;
     const currentDue = Number(supplier.due || 0);
 
@@ -1645,7 +1239,6 @@ async function createPurchaseReturn(req, res) {
       { session }
     );
 
-    // 6️⃣ Save Purchase Return Document
     const returnDoc = {
       _id: returnId,
       supplier_id: supplierId,
@@ -1660,9 +1253,7 @@ async function createPurchaseReturn(req, res) {
     };
 
     await purchaseReturnsCol.insertOne(returnDoc, { session });
-
     await session.commitTransaction();
-    console.log("✅ Purchase Return committed successfully");
 
     return res.status(201).json({
       success: true,
@@ -1672,61 +1263,76 @@ async function createPurchaseReturn(req, res) {
 
   } catch (err) {
     await session.abortTransaction();
-    console.error("❌ Purchase return failed:", err.message);
+    console.error("Purchase return failed:", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     await session.endSession();
   }
 }
 
-// -------------------- GET ALL PURCHASE RETURNS --------------------
+// -------------------- GET ALL PURCHASE RETURNS (PAGINATED) --------------------
 async function getPurchaseReturns(req, res) {
   try {
-    const returns = await purchaseReturnsCol.aggregate([
-      {
-        $lookup: {
-          from: "suppliers",
-          localField: "supplier_id",
-          foreignField: "_id",
-          as: "supplier"
-        }
-      },
-      {
-        $unwind: {
-          path: "$supplier",
-          preserveNullAndEmptyArrays: true
-        }
-      },
-      {
-        $lookup: {
-          from: "payment_accounts",
-          localField: "account_id",
-          foreignField: "_id",
-          as: "account"
-        }
-      },
-      {
-        $unwind: {
-          path: "$account",
-          preserveNullAndEmptyArrays: true
-        }
-      },
-      {
-        $addFields: {
-          supplier_name: "$supplier.name",
-          supplier_phone: "$supplier.phone",
-          account_name: "$account.name"
-        }
-      },
-      {
-        $project: { supplier: 0, account: 0 }       },       {$sort: { date: -1 }
-      }
-    ]).toArray();
+    const { page, limit, skip } = extractPagination(req.query);
+
+    const [returns, totalRecords] = await Promise.all([
+      purchaseReturnsCol
+        .aggregate([
+          { $sort: { date: -1 } },           {$skip: skip },
+          { $limit: limit },
+          {
+            $lookup: {
+              from: "suppliers",
+              localField: "supplier_id",
+              foreignField: "_id",
+              as: "supplier"
+            }
+          },
+          {
+            $unwind: {
+              path: "$supplier",
+              preserveNullAndEmptyArrays: true
+            }
+          },
+          {
+            $lookup: {
+              from: "payment_accounts",
+              localField: "account_id",
+              foreignField: "_id",
+              as: "account"
+            }
+          },
+          {
+            $unwind: {
+              path: "$account",
+              preserveNullAndEmptyArrays: true
+            }
+          },
+          {
+            $addFields: {
+              supplier_name: "$supplier.name",
+              supplier_phone: "$supplier.phone",
+              account_name: "$account.name"
+            }
+          },
+          {
+            $project: { supplier: 0, account: 0 }
+          }
+        ])
+        .toArray(),
+      purchaseReturnsCol.countDocuments({})
+    ]);
 
     return res.status(200).json({
       success: true,
       count: returns.length,
-      data: returns
+      data: returns,
+      pagination: {
+        total: totalRecords,
+        page,
+        limit,
+        totalPages: Math.ceil(totalRecords / limit)
+      }
     });
   } catch (err) {
     console.error("getPurchaseReturns error:", err);
@@ -1781,19 +1387,11 @@ async function getPurchaseReturnById(req, res) {
   }
 }
 
-/* =====================================================
-   UPDATE PURCHASE RETURN BY ID
-===================================================== */
+// -------------------- UPDATE PURCHASE RETURN BY ID --------------------
 async function updatePurchaseReturn(req, res) {
   const session = client.startSession();
 
   try {
-    console.log("====================================");
-    console.log("🚀 UPDATE PURCHASE RETURN START");
-    console.log("====================================");
-    console.log("📥 Return ID:", req.params.id);
-    console.log("📥 Payload:", JSON.stringify(req.body, null, 2));
-
     const returnId = normalizeIdV2(req.params.id, "returnId");
     const {
       supplier_id,
@@ -1812,7 +1410,6 @@ async function updatePurchaseReturn(req, res) {
     const newTotal = Number(total_return_amount || 0);
     const newAccountId = account_id || paymentAccountId;
 
-    // 1️⃣ Input Validation
     if (!supplier_id) {
       return res.status(400).json({ success: false, message: "Supplier ID is required" });
     }
@@ -1827,7 +1424,6 @@ async function updatePurchaseReturn(req, res) {
     }
 
     await session.startTransaction();
-    console.log("✅ Transaction started");
 
     const existingReturn = await purchaseReturnsCol.findOne({ _id: returnId }, { session });
     if (!existingReturn) {
@@ -1842,7 +1438,6 @@ async function updatePurchaseReturn(req, res) {
       return res.status(404).json({ success: false, message: "Supplier not found" });
     }
 
-    // 2️⃣ Rollback Old Inventory Deductions (Restore stock)
     for (const item of existingReturn.products || []) {
       const productIdStr = extractProductId(item.product_id);
       if (!productIdStr) continue;
@@ -1861,26 +1456,20 @@ async function updatePurchaseReturn(req, res) {
       await recalculateAveragePurchasePrice(productObjId, session);
     }
 
-    // 3️⃣ Account Balance Adjustments
     const oldRefund = Number(existingReturn.refund_received ?? existingReturn.refund_amount ?? 0);
     const oldAccountIdRaw = existingReturn.account_id || existingReturn.paymentAccountId;
     const oldAccountIdStr = oldAccountIdRaw ? oldAccountIdRaw.toString() : null;
     const newAccountIdStr = newAccountId ? normalizeIdV2(newAccountId, "account_id").toString() : null;
 
-    console.log("💰 Old Refund:", oldRefund, "on Account:", oldAccountIdStr);
-    console.log("💰 New Refund:", newRefund, "on Account:", newAccountIdStr);
-
     if (oldAccountIdStr && newAccountIdStr && oldAccountIdStr === newAccountIdStr) {
-      // Same account: calculate net difference to avoid false "insufficient balance" rejections
       const refundDiff = newRefund - oldRefund;
 
       if (refundDiff > 0) {
-        console.log(`📈 Crediting +৳${refundDiff} to Account:`, newAccountIdStr);
         const paymentResult = await updateAccountBalance({
           client,
           db,
           amount: refundDiff,
-          transactionType: "credit", // Net refund increased -> add money to account
+          transactionType: "credit",
           entrySource: "purchase_return_update",
           accountId: newAccountIdStr,
           details: {
@@ -1892,12 +1481,11 @@ async function updatePurchaseReturn(req, res) {
         });
         if (!paymentResult.success) throw new Error(paymentResult.message);
       } else if (refundDiff < 0) {
-        console.log(`📉 Debiting -৳${Math.abs(refundDiff)} from Account:`, newAccountIdStr);
         const paymentResult = await updateAccountBalance({
           client,
           db,
           amount: Math.abs(refundDiff),
-          transactionType: "debit", // Net refund decreased -> deduct money from account
+          transactionType: "debit",
           entrySource: "purchase_return_update",
           accountId: newAccountIdStr,
           details: {
@@ -1910,9 +1498,7 @@ async function updatePurchaseReturn(req, res) {
         if (!paymentResult.success) throw new Error(paymentResult.message);
       }
     } else {
-      // Different accounts: Revert old account (debit), then credit new account
       if (oldRefund > 0 && oldAccountIdStr) {
-        console.log(`🔄 Reverting old refund of ৳${oldRefund} from Account:`, oldAccountIdStr);
         const revertResult = await updateAccountBalance({
           client,
           db,
@@ -1930,7 +1516,6 @@ async function updatePurchaseReturn(req, res) {
       }
 
       if (newRefund > 0 && newAccountIdStr) {
-        console.log(`💸 Depositing new refund of ৳${newRefund} to Account:`, newAccountIdStr);
         const paymentResult = await updateAccountBalance({
           client,
           db,
@@ -1949,7 +1534,6 @@ async function updatePurchaseReturn(req, res) {
       }
     }
 
-    // 4️⃣ Rollback Old Supplier Balances
     const oldTotal = Number(existingReturn.total_return_amount || 0);
     const oldNetCredit = oldTotal - oldRefund;
 
@@ -1965,7 +1549,6 @@ async function updatePurchaseReturn(req, res) {
       { session }
     );
 
-    // 5️⃣ Apply New Inventory Deductions
     let returnDate = existingReturn.date;
     if (date) {
       const parsed = new Date(date);
@@ -2001,7 +1584,6 @@ async function updatePurchaseReturn(req, res) {
       await recalculateAveragePurchasePrice(productObjId, session);
     }
 
-    // 6️⃣ Apply New Supplier Ledger Adjustments
     const newNetCredit = newTotal - newRefund;
     const currentSupplier = await suppliersCol.findOne({ _id: supplierId }, { session });
     const currentDue = Number(currentSupplier?.due || 0);
@@ -2045,7 +1627,6 @@ async function updatePurchaseReturn(req, res) {
       { session }
     );
 
-    // 7️⃣ Update the Return Document
     await purchaseReturnsCol.updateOne(
       { _id: returnId },
       {
@@ -2073,7 +1654,6 @@ async function updatePurchaseReturn(req, res) {
     );
 
     await session.commitTransaction();
-    console.log("✅ Purchase Return update committed successfully");
 
     return res.status(200).json({
       success: true,
@@ -2081,7 +1661,7 @@ async function updatePurchaseReturn(req, res) {
     });
   } catch (err) {
     await session.abortTransaction();
-    console.error("❌ Update purchase return failed:", err.message);
+    console.error("Update purchase return failed:", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     await session.endSession();
@@ -2102,7 +1682,6 @@ async function deletePurchaseReturn(req, res) {
 
     await session.startTransaction();
 
-    // 1️⃣ Revert Inventory: restore deducted products back to stock
     for (const item of existingReturn.products || []) {
       const productIdStr = extractProductId(item.product_id);
       if (!productIdStr) continue;
@@ -2121,7 +1700,6 @@ async function deletePurchaseReturn(req, res) {
       await recalculateAveragePurchasePrice(productObjId, session);
     }
 
-    // 2️⃣ Revert Refund Payment: debit refund out of account
     const refundToRevert = Number(existingReturn.refund_received ?? existingReturn.refund_amount ?? 0);
     const accountToRevert = existingReturn.account_id || existingReturn.paymentAccountId;
 
@@ -2142,7 +1720,6 @@ async function deletePurchaseReturn(req, res) {
       if (!revertResult.success) throw new Error(revertResult.message);
     }
 
-    // 3️⃣ Revert Supplier Ledger
     if (existingReturn.supplier_id) {
       const returnTotal = Number(existingReturn.total_return_amount || 0);
       const netCredit = returnTotal - refundToRevert;
@@ -2169,9 +1746,7 @@ async function deletePurchaseReturn(req, res) {
       );
     }
 
-    // 4️⃣ Delete Record
     await purchaseReturnsCol.deleteOne({ _id: returnId }, { session });
-
     await session.commitTransaction();
 
     return res.status(200).json({
@@ -2180,7 +1755,7 @@ async function deletePurchaseReturn(req, res) {
     });
   } catch (err) {
     await session.abortTransaction();
-    console.error("Delete purchase return failed:", err);
+    console.error("Delete purchase return failed:", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     await session.endSession();

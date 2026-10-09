@@ -8,8 +8,21 @@ const salesCol = db.collection("sales");
 const inventoryCol = db.collection("inventory");
 const productsCol = db.collection("products");
 const customersCol = db.collection("customers");
+
+const batchColl = db.collection("batches");
 // Add with your collection definitions at the top
 const salesReturnsCol = db.collection("sales_returns");
+
+
+/**
+ * Standardized Pagination Helper
+ */
+function extractPagination(query) {
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 20));
+  const skip = (page - 1) * limit;
+  return { page, limit, skip };
+}
 
 async function deductFromInventory(product, memoId, session) {
   try {
@@ -140,60 +153,54 @@ module.exports.createSell = async (req, res) => {
 
 module.exports.getSales = async (req, res) => {
   try {
-    const sales = await salesCol
-      .aggregate([
-        {
-          $lookup: {
-            from: "customers",
-            let: {
-              customerObjId: {
-                $toObjectId: "$customer_id",
-              },
-            },
-            pipeline: [
-              {
-                $match: {
-                  $expr: {
-                    $eq: ["$_id", "$$customerObjId"],
-                  },
-                },
-              },
-              {
-                $project: {
-                  _id: 1,
-                  name: 1,
-                },
-              },
-            ],
-            as: "customer",
-          },
-        },
-        {
-          $addFields: {
-            customer_name: {
-              $ifNull: [
-                { $arrayElemAt: ["$customer.name", 0] },
-                "Unknown Customer",
+    const { page, limit, skip } = extractPagination(req.query);
+    const { customer_id } = req.query;
+
+    const filter = {};
+    if (customer_id && ObjectId.isValid(customer_id)) {
+      filter.customer_id = new ObjectId(customer_id);
+    }
+
+    const [sales, totalRecords] = await Promise.all([
+      salesCol
+        .aggregate([
+          { $match: filter },
+          { $sort: { date: -1 } },
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $lookup: {
+              from: "customers",
+              let: { customerObjId: { $toObjectId: "$customer_id" } },
+              pipeline: [
+                { $match: { $expr: { $eq: ["$_id", "$$customerObjId"] } } },
+                { $project: { _id: 1, name: 1 } },
               ],
+              as: "customer",
             },
           },
-        },
-        {
-          $project: {
-            customer: 0,
+          {
+            $addFields: {
+              customer_name: {
+                $ifNull: [{ $arrayElemAt: ["$customer.name", 0] }, "Unknown Customer"],
+              },
+            },
           },
-        },
-        {
-          $sort: {
-            date: -1,
-          },
-        },
-      ])
-      .toArray();
+          { $project: { customer: 0 } }
+        ])
+        .toArray(),
+      salesCol.countDocuments(filter)
+    ]);
 
     res.status(200).json({
       success: true,
       data: sales,
+      pagination: {
+        total: totalRecords,
+        page,
+        limit,
+        totalPages: Math.ceil(totalRecords / limit)
+      }
     });
   } catch (err) {
     res.status(500).json({
@@ -208,327 +215,179 @@ module.exports.getSalesReport = async (req, res) => {
   try {
     const { type } = req.params;
     const { date, month, year, from, to } = req.query;
-    console.log('hit getSales report', req.query, type);
+    const { page, limit, skip } = extractPagination(req.query);
+    
     let matchQuery = {};
 
-    /* --------------------------------------------------
-       DAILY REPORT
-       /reports/daily?date=YYYY-MM-DD
-    -------------------------------------------------- */
     if (type === "daily") {
       if (!date) return res.status(400).json({ success: false, message: "Date is required" });
       const start = new Date(date);
       start.setUTCHours(0, 0, 0, 0);
       const end = new Date(date);
       end.setUTCHours(23, 59, 59, 999);
-
-      console.log("daily sale", start, end);
       matchQuery.date = { $gte: start, $lte: end };
-    }
-
-
-    /* --------------------------------------------------
-       MONTHLY REPORT
-       /reports/monthly?month=12&year=2023
-    -------------------------------------------------- */
+    } 
     else if (type === "monthly") {
-      if (!month || !year)
-        return res.status(400).json({ success: false, message: "Month and year are required" });
-
-      const start = new Date(year, month - 1, 1);
-      const end = new Date(year, month, 1);
-      console.log("monthly sale", start, end);
+      if (!month || !year) return res.status(400).json({ success: false, message: "Month and year are required" });
+      const start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
+      const end = new Date(Date.UTC(year, month, 1, 0, 0, 0));
       matchQuery.date = { $gte: start, $lt: end };
-    }
-
-    /* --------------------------------------------------
-       YEARLY REPORT
-       /reports/yearly?year=2023
-    -------------------------------------------------- */
+    } 
     else if (type === "yearly") {
-      if (!year)
-        return res.status(400).json({ success: false, message: "Year is required" });
-
-      const start = new Date(year, 0, 1);
-      const end = new Date(Number(year) + 1, 0, 1);
-      console.log("yearly sale", start, end);
-
+      if (!year) return res.status(400).json({ success: false, message: "Year is required" });
+      const start = new Date(Date.UTC(year, 0, 1, 0, 0, 0));
+      const end = new Date(Date.UTC(Number(year) + 1, 0, 1, 0, 0, 0));
       matchQuery.date = { $gte: start, $lt: end };
-    }
-
-    /* --------------------------------------------------
-       CUSTOM RANGE REPORT
-       /reports/range?from=YYYY-MM-DD&to=YYYY-MM-DD
-    -------------------------------------------------- */
+    } 
     else if (type === "range") {
-      if (!from || !to)
-        return res.status(400).json({ success: false, message: "From and To dates are required" });
-
-      matchQuery.date = {
-        $gte: new Date(from),
-        $lte: new Date(to),
-      };
-    }
-
+      if (!from || !to) return res.status(400).json({ success: false, message: "From and To dates are required" });
+      const start = new Date(from);
+      start.setUTCHours(0, 0, 0, 0);
+      const end = new Date(to);
+      end.setUTCHours(23, 59, 59, 999);
+      matchQuery.date = { $gte: start, $lte: end };
+    } 
     else {
       return res.status(400).json({ success: false, message: "Invalid report type" });
     }
 
-    /* --------------------------------------------------
-       FETCH SALES
-    -------------------------------------------------- */
-    const sales = await salesCol
-      .find(matchQuery)
-      .sort({ date: -1 })
-      .toArray();
+    const reportAggregation = await salesCol.aggregate([
+      { $match: matchQuery },
+      {
+        $facet: {
+          summary: [
+            {
+              $group: {
+                _id: null,
+                totalAmount: { $sum: "$total_amount" },
+                totalPaid: { $sum: "$paid_amount" },
+                count: { $sum: 1 }
+              }
+            }
+          ],
+          paginatedData: [
+            { $sort: { date: -1 } },
+            { $skip: skip },
+            { $limit: limit }
+          ]
+        }
+      }
+    ]).toArray();
 
-    /* --------------------------------------------------
-       SUMMARY
-    -------------------------------------------------- */
-    const totalAmount = sales.reduce((sum, s) => sum + (s.total_amount || 0), 0);
-    const totalPaid = sales.reduce((sum, s) => sum + (s.paid_amount || 0), 0);
+    const summaryData = reportAggregation[0].summary[0] || { totalAmount: 0, totalPaid: 0, count: 0 };
+    const salesData = reportAggregation[0].paginatedData;
 
     res.status(200).json({
       success: true,
-      count: sales.length,
+      count: summaryData.count,
       summary: {
-        totalAmount,
-        totalPaid,
-        due: totalAmount - totalPaid,
+        totalAmount: summaryData.totalAmount,
+        totalPaid: summaryData.totalPaid,
+        due: summaryData.totalAmount - summaryData.totalPaid,
       },
-      data: sales,
+      data: salesData,
+      pagination: {
+        total: summaryData.count,
+        page,
+        limit,
+        totalPages: Math.ceil(summaryData.count / limit)
+      }
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-module.exports.getProductWiseSellRecord = async (
-  req,
-  res
-) => {
-  console.log(
-    "hit /product-sales"
-  );
-
+module.exports.getProductWiseSellRecord = async (req, res) => {
   try {
-    const result =
-      await salesCol
-        .aggregate([
-          // join customer
-          {
-            $lookup: {
-              from:
-                "customers",
-              localField:
-                "customer_id",
-              foreignField:
-                "_id",
-              as: "customer",
-            },
-          },
+    const { page, limit, skip } = extractPagination(req.query);
+    
+    // 1. First get total distinct products sold to calculate total pages
+    const distinctProductsResult = await salesCol.aggregate([
+      { $unwind: "$products" },
+      { $group: { _id: "$products.product_id" } },
+      { $count: "totalDistinct" }
+    ]).toArray();
+    
+    const totalRecords = distinctProductsResult.length > 0 ? distinctProductsResult[0].totalDistinct : 0;
 
-          {
-            $unwind: {
-              path:
-                "$customer",
-              preserveNullAndEmptyArrays: true,
-            },
-          },
-
-          // flatten products
-          {
-            $unwind:
-              "$products",
-          },
-
-          // get product info
-          {
-            $lookup: {
-              from:
-                "products",
-              let: {
-                productId:
-                  "$products.product_id",
-              },
-              pipeline: [
-                {
-                  $match: {
-                    $expr: {
-                      $eq: [
-                        {
-                          $toString:
-                            "$_id",
-                        },
-                        "$$productId",
-                      ],
-                    },
-                  },
-                },
-              ],
-              as: "productInfo",
-            },
-          },
-
-          {
-            $unwind: {
-              path:
-                "$productInfo",
-              preserveNullAndEmptyArrays: true,
-            },
-          },
-
-          // group by product
-          {
-            $group: {
-              _id:
-                "$products.product_id",
-
-              product_name:
-              {
-                $first:
-                  "$productInfo.item_name",
-              },
-
-              total_qty: {
-                $sum:
-                  "$products.qty",
-              },
-
-              total_sale_amount:
-              {
-                $sum:
-                  "$products.subtotal",
-              },
-
-              avg_sale_price:
-              {
-                $avg:
-                  "$products.sale_price",
-              },
-
-              total_sale_count:
-              {
-                $sum: 1,
-              },
-
-              sales: {
-                $push: {
-                  _id: {
-                    $toString:
-                      "$_id",
-                  },
-
-                  memoNo:
-                    "$memoNo",
-
-                  customer_id:
-                  {
-                    $cond: [
-                      "$customer_id",
-                      {
-                        $toString:
-                          "$customer_id",
-                      },
-                      null,
-                    ],
-                  },
-
-                  customer_name:
-                    "$customer.name",
-
-                  qty:
-                    "$products.qty",
-
-                  sale_price:
-                    "$products.sale_price",
-
-                  subtotal:
-                    "$products.subtotal",
-
-                  total_amount:
-                    "$total_amount",
-
-                  paid_amount:
-                    "$paid_amount",
-
-                  due_amount:
-                    "$due_amount",
-
-                  payment_method:
-                    "$payment_method",
-
-                  date:
-                    "$date",
-                },
-              },
-
-              last_sale_date:
-              {
-                $max:
-                  "$date",
-              },
-            },
-          },
-
-          // latest first
-          {
-            $sort: {
-              last_sale_date:
-                -1,
-            },
-          },
-
-          // final shape
-          {
-            $project: {
-              _id: 0,
-
-              product_id:
-                "$_id",
-
-              product_name: 1,
-
-              total_qty: 1,
-
-              total_sale_amount: 1,
-
-              avg_sale_price:
-              {
-                $round: [
-                  "$avg_sale_price",
-                  2,
-                ],
-              },
-
-              total_sale_count: 1,
-
-              last_sale_date: 1,
-
-              sales: 1,
-            },
-          },
-        ])
-        .toArray();
+    // 2. Paginate the grouped results
+    const result = await salesCol
+      .aggregate([
+        { $unwind: { path: "$products" } },
+        // Group by product first to apply skip/limit early
+        {
+          $group: {
+            _id: "$products.product_id",
+            total_qty: { $sum: "$products.qty" },
+            total_sale_amount: { $sum: "$products.subtotal" },
+            avg_sale_price: { $avg: "$products.sale_price" },
+            total_sale_count: { $sum: 1 },
+            last_sale_date: { $max: "$date" },
+            sales: {
+              $push: {
+                memoNo: "$memoNo",
+                customer_id: "$customer_id",
+                qty: "$products.qty",
+                sale_price: "$products.sale_price",
+                subtotal: "$products.subtotal",
+                date: "$date"
+              }
+            }
+          }
+        },
+        { $sort: { last_sale_date: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+        // Now lookup product names only for the limited subset
+        {
+          $lookup: {
+            from: "products",
+            let: { productId: { $toObjectId: "$_id" } },
+            pipeline: [
+              { $match: { $expr: { $eq: ["$_id", "$$productId"] } } },
+              { $project: { item_name: 1 } }
+            ],
+            as: "productInfo"
+          }
+        },
+        { $unwind: { path: "$productInfo", preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            product_id: "$_id",
+            product_name: { $ifNull: ["$productInfo.item_name", "Unknown"] },
+            total_qty: 1,
+            total_sale_amount: 1,
+            avg_sale_price: { $round: ["$avg_sale_price", 2] },
+            total_sale_count: 1,
+            last_sale_date: 1,
+            sales: 1
+          }
+        }
+      ])
+      .toArray();
 
     return res.status(200).json({
       success: true,
-      count:
-        result.length,
+      count: result.length,
       data: result,
+      pagination: {
+        total: totalRecords,
+        page,
+        limit,
+        totalPages: Math.ceil(totalRecords / limit)
+      }
     });
   } catch (error) {
     console.error(error);
-
     return res.status(500).json({
       success: false,
-      message:
-        "Failed to get product-wise sales records",
-      error:
-        error.message,
+      message: "Failed to get product-wise sales records",
+      error: error.message,
     });
   }
-}
+};
 
 
 /* =====================================================
@@ -642,15 +501,24 @@ module.exports.updateSaleById = async (req, res) => {
 
   try {
     const saleId = new ObjectId(req.params.id);
+    const { 
+      memoNo, 
+      date, 
+      customer_id, 
+      batch_id, 
+      products, 
+      total_amount, 
+      paid_amount = 0, 
+      payment_method, 
+      account_id,
+      notes 
+    } = req.body;
 
-    const { memoNo, date, customer_id, products, total_amount, paid_amount = 0, payment_method, account_id } = req.body;
     const payload = req.body;
-
-    console.log("➡️ Update sale called:", saleId.toString());
-    console.log("📦 Incoming payload products:", products);
+    const newTotal = Number(total_amount || 0);
+    const newPaid = Number(paid_amount || 0);
 
     await session.startTransaction();
-    console.log("✅ Transaction started");
 
     /* --------------------------------------------------
        1️⃣ FETCH EXISTING SALE
@@ -658,133 +526,159 @@ module.exports.updateSaleById = async (req, res) => {
     const existingSale = await salesCol.findOne({ _id: saleId }, { session });
 
     if (!existingSale) {
-      console.log("❌ Sale not found");
+      await session.abortTransaction();
       return res.status(404).json({ success: false, message: "Sale not found" });
     }
 
     /* --------------------------------------------------
-       2️⃣ INVENTORY ADJUSTMENT (if products changed)
+       2️⃣ FARM BATCH SYNCHRONIZATION (LINK / UNLINK / SWITCH)
+    -------------------------------------------------- */
+    const oldBatchId = existingSale.batch_id ? existingSale.batch_id.toString() : null;
+    const newBatchId = batch_id ? batch_id.toString() : null;
+
+    if (oldBatchId !== newBatchId) {
+      // Unlink sale memo from old batch
+      if (oldBatchId) {
+        await batchColl.updateOne(
+          { _id: new ObjectId(oldBatchId) },
+          { $pull: { salesHistoryIds: saleId } },
+          { session }
+        );
+      }
+
+      // Link sale memo to new batch
+      if (newBatchId) {
+        await batchColl.updateOne(
+          { _id: new ObjectId(newBatchId) },
+          { $addToSet: { salesHistoryIds: saleId } },
+          { session }
+        );
+      }
+    }
+
+    /* --------------------------------------------------
+       3️⃣ INVENTORY ADJUSTMENT (Differential check)
     -------------------------------------------------- */
     if (products && products.length) {
       const oldMap = new Map();
-      existingSale.products.forEach(p => oldMap.set(p.product_id.toString(), p));
+      (existingSale.products || []).forEach(p => oldMap.set(p.product_id.toString(), p));
 
       const newMap = new Map();
       products.forEach(p => newMap.set(p.product_id.toString(), p));
 
-      // Added or updated products
+      // Newly added or updated items
       for (const [productId, newProd] of newMap) {
         const oldProd = oldMap.get(productId);
 
         if (!oldProd) {
-          // ➕ Newly added product: deduct from inventory
-          const dec = await decreaseInventoryStock({ product_id: productId, qty: newProd.qty });
+          const dec = await decreaseInventoryStock({ product_id: productId, qty: Number(newProd.qty) }, session);
           if (!dec.success) throw new Error(dec.message);
-
         } else {
-          const diff = newProd.qty - oldProd.qty;
-
+          const diff = Number(newProd.qty) - Number(oldProd.qty);
           if (diff > 0) {
-            // Increase sale qty: deduct more from inventory
-            const dec = await decreaseInventoryStock({ product_id: productId, qty: diff });
+            const dec = await decreaseInventoryStock({ product_id: productId, qty: diff }, session);
             if (!dec.success) throw new Error(dec.message);
-
           } else if (diff < 0) {
-            // Decrease sale qty: return inventory
-            const inc = await increaseInventoryStock({ product_id: productId, qty: Math.abs(diff) });
+            const inc = await increaseInventoryStock({ product_id: productId, qty: Math.abs(diff) }, session);
             if (!inc.success) throw new Error(inc.message);
           }
         }
       }
 
-      // Removed products: return full qty to inventory
+      // Completely removed items: return stock
       for (const [productId, oldProd] of oldMap) {
         if (!newMap.has(productId)) {
-          const inc = await increaseInventoryStock({ product_id: productId, qty: oldProd.qty });
+          const inc = await increaseInventoryStock({ product_id: productId, qty: Number(oldProd.qty) }, session);
           if (!inc.success) throw new Error(inc.message);
         }
       }
     }
 
     /* --------------------------------------------------
-       3️⃣ ACCOUNT BALANCE ADJUSTMENT
+       4️⃣ ACCOUNT BALANCE ADJUSTMENT
     -------------------------------------------------- */
-    const oldPaid = existingSale.paid_amount || 0;
-    const newPaid = payload.paid_amount || 0;
+    const oldPaid = Number(existingSale.paid_amount || 0);
 
+    // Revert previous payment (Customer payment was credit inflow, reversing it requires a debit outflow)
     if (oldPaid > 0 && existingSale.account_id) {
-      // Revert old payment
-      await updateAccountBalance({
+      const revertResult = await updateAccountBalance({
         client,
         db,
         amount: oldPaid,
-        transactionType: "credit",
-        entrySource: "sale_update",
+        transactionType: "debit",
+        entrySource: "sale_update_revert",
         accountId: existingSale.account_id.toString(),
-        details: existingSale,
+        details: { saleId, remarks: "Reverted prior payment on sale update" },
         session
       });
+      if (!revertResult.success) throw new Error(revertResult.message);
     }
 
+    // Apply new payment (Cash inflow from customer is credited)
     if (newPaid > 0 && account_id) {
-      // Apply new payment
-      await updateAccountBalance({
+      const applyResult = await updateAccountBalance({
         client,
         db,
         amount: newPaid,
-        transactionType: "debit",
-        entrySource: "sale_update",
-        accountId: payload.account_id,
-        details: payload,
+        transactionType: "credit",
+        entrySource: "sale_update_apply",
+        accountId: account_id.toString(),
+        details: { saleId, remarks: "Applied updated payment for sale" },
         session
       });
+      if (!applyResult.success) throw new Error(applyResult.message);
     }
 
     /* --------------------------------------------------
-       4️⃣ CUSTOMER DUE & HISTORY ADJUSTMENT
+       5️⃣ CUSTOMER DUE & ADVANCE RECONCILIATION
     -------------------------------------------------- */
-    const oldTotal = existingSale.total_amount || 0;
-    const newTotal = total_amount;
+    const oldTotal = Number(existingSale.total_amount || 0);
+    const oldDue = Math.max(0, oldTotal - oldPaid);
+    const newDue = Math.max(0, newTotal - newPaid);
 
-    const oldDue = oldTotal - oldPaid;
-    const newDue = newTotal - newPaid;
-
-    const newAdvance = newPaid > total_amount ? newPaid - total_amount : 0;
     const oldAdvance = oldPaid > oldTotal ? oldPaid - oldTotal : 0;
+    const newAdvance = newPaid > newTotal ? newPaid - newTotal : 0;
 
-    if (existingSale.customer_id) {
+    const customerObjId = customer_id ? new ObjectId(customer_id) : existingSale.customer_id;
+
+    if (customerObjId) {
       await customersCol.updateOne(
-        { _id: new ObjectId(existingSale.customer_id) },
+        { _id: new ObjectId(customerObjId) },
         {
-          $inc: { due: newDue - oldDue, advance: newAdvance - oldAdvance },
-          // $set: { last_payment_date: new Date() },
-          $set: { last_payment_date: new Date().toISOString() }
+          $inc: {
+            total_sales: newTotal - oldTotal,
+            due: newDue - oldDue,
+            total_due: newDue - oldDue,
+            advance: newAdvance - oldAdvance
+          },
+          $set: { 
+            last_payment_date: newPaid > 0 ? new Date() : (existingSale.last_payment_date || new Date())
+          }
         },
         { session }
       );
     }
 
     /* --------------------------------------------------
-       5️⃣ UPDATE SALE DOCUMENT
+       6️⃣ UPDATE SALE RECORD
     -------------------------------------------------- */
-
-    // const sellDate = date ? new Date(date) : new Date();
     const sellDate = date ? new Date(date) : existingSale.date;
 
     await salesCol.updateOne(
       { _id: saleId },
       {
         $set: {
-          products: payload.products || existingSale.products,
+          memoNo: memoNo || existingSale.memoNo,
+          customer_id: customerObjId,
+          batch_id: newBatchId ? new ObjectId(newBatchId) : null,
+          products: products || existingSale.products,
           total_amount: newTotal,
           paid_amount: newPaid,
           due_amount: newDue,
-          date: date ? new Date(date) : existingSale.date,
-          payment_method: payload.payment_method || existingSale.payment_method,
-          // account_id: payload.account_id ? new ObjectId(payload.account_id) : existingSale.account_id,
-          account_id: payload.account_id
-            ? new ObjectId(payload.account_id)
-            : existingSale.account_id || null,
+          date: sellDate,
+          payment_method: payment_method || existingSale.payment_method,
+          account_id: newPaid > 0 && account_id ? new ObjectId(account_id) : null,
+          notes: notes !== undefined ? notes : (existingSale.notes || ""),
           updatedAt: new Date()
         }
       },
@@ -792,18 +686,20 @@ module.exports.updateSaleById = async (req, res) => {
     );
 
     await session.commitTransaction();
-    console.log("✅ Transaction committed");
 
     const updatedSale = await salesCol.findOne({ _id: saleId });
-    res.status(200).json({ success: true, message: "Sale updated successfully", data: updatedSale });
+    return res.status(200).json({ 
+      success: true, 
+      message: "Sale updated successfully", 
+      data: updatedSale 
+    });
 
   } catch (error) {
     await session.abortTransaction();
     console.error("❌ Sale update failed:", error);
-    res.status(500).json({ success: false, message: error.message });
+    return res.status(500).json({ success: false, message: error.message });
   } finally {
     await session.endSession();
-    console.log("🧹 Session ended");
   }
 };
 
